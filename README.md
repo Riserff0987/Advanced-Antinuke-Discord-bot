@@ -14,6 +14,7 @@ A Discord bot that protects servers from nukes, raids, spam, webhook floods and 
 - **Anti-raid:** detects join floods and responds with kick or ban, with optional account-age checks.
 - **Anti-spam, AutoMod and bad words:** the bot's own message filters (invites, links, bad words, mentions, spam).
 - **Discord AutoMod sync:** creates Discord's built-in AutoMod rules from your settings and logs what Discord blocks.
+- **AutoMod rule check:** disables any AutoMod rule that would block almost every message, from anyone, including trusted users. Runs automatically and can be scanned on demand with `/automodcheck`.
 - **App guard:** punishes the user behind a user-installed app that sends a burst of messages, and deletes their spam.
 - **Webhook guard:** deletes a webhook that bursts messages, removes its messages, and punishes its creator.
 - **Bot spam guard:** bans a bot account that floods messages.
@@ -75,6 +76,12 @@ Needs Manage Server. Creates rules named `[Bot] Words`, `[Bot] Mentions` and `[B
 - `/discordautomod`: list the rules the bot manages.
 - `/discordautomod sync`: create or update them. Run again after changing settings.
 - `/discordautomod remove`: delete them.
+
+### AutoMod checks (`/automodcheck`)
+Needs Manage Server. Scans every AutoMod rule, disables any that would block almost every message, and lists them.
+- `/automodcheck`: runs the scan now. Rules the bot's own `[Bot]` rules are skipped.
+
+The same check runs automatically whenever an AutoMod rule is created or changed, and every 10 minutes. A disabled rule is never deleted, so review it in Server Settings → AutoMod before turning it back on.
 
 ### Anti-raid (`/raid`)
 Needs Manage Server.
@@ -182,3 +189,7 @@ If you don't set `DATABASE_URL`, the nuke list stays in a local file. That works
 - **Database says "local file only":** check `DATABASE_URL`, and that the database accepts connections from your host.
 - **Punishments or quarantine fail:** check the bot's role position and permissions.
 - **`429 Too Many Requests` at startup:** the host's IP is temporarily blocked by Discord after repeated restarts. Stop the bot for 30 minutes or more, then start it once.
+
+## Licence
+
+No license
