@@ -2,6 +2,7 @@
 an discord antinuke and antiraid project.
 you can freely fork it and edit features and code using ai. 
 you can also use ai and update syntax if discord.py drops new update and this one doesn't work.
+[Join our Support server for buying premium features and reporting issues.We can work on your query faster when we get it through Discord server](https://discord.gg/GHyc7GyNvX)
 # Nobara Antinuke (Free)
 
 A Discord bot that protects servers from nukes, raids, spam, webhook floods and bot floods. It bans or quarantines attackers, shares a database of known nuke bots, and keeps your Discord AutoMod rules in sync with the bot's settings.
