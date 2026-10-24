@@ -3,6 +3,7 @@ an discord antinuke and antiraid project.
 you can freely fork it and edit features and code using ai. 
 you can also use ai and update syntax if discord.py drops new update and this one doesn't work.
 [Join our Support server for buying premium features and reporting issues.We can work on your query faster when we get it through Discord server](https://discord.gg/GHyc7GyNvX)
+
 # Nobara Antinuke (Free)
 
 A Discord bot that protects servers from nukes, raids, spam, webhook floods and bot floods. It bans or quarantines attackers, shares a database of known nuke bots, and keeps your Discord AutoMod rules in sync with the bot's settings.
@@ -11,7 +12,8 @@ A Discord bot that protects servers from nukes, raids, spam, webhook floods and 
 
 - **Anti-nuke:** limits mass channel, role, emoji and sticker creates and deletes, bans, kicks, renames and nickname changes. Punishes the user or bot responsible: ban, kick, strip dangerous roles, or quarantine.
 - **Dangerous permissions guard:** if someone who isn't trusted gives out admin, manage server, manage roles, manage channels, ban, kick or manage webhooks, their roles are stripped (bots are banned).
-- **Quarantine (Wick-style):** a Quarantine role that hides every channel. Roles are saved and restored on release.
+- **Quarantine (Wick-style):** a Quarantine role that hides every channel, except a `#quarantine` appeal channel where quarantined members can see and talk. Roles are saved and restored on release.
+- **Protected from itself and owners:** the bot never punishes its own actions, and the server owner, bot owners and the whitelist are exempt from anti-nuke.
 - **Anti-raid:** detects join floods and responds with kick or ban, with optional account-age checks.
 - **Anti-spam, AutoMod and bad words:** the bot's own message filters (invites, links, bad words, mentions, spam).
 - **Discord AutoMod sync:** creates Discord's built-in AutoMod rules from your settings and logs what Discord blocks.
@@ -38,6 +40,7 @@ All commands work as slash commands (`/command`) and as prefix commands (default
 
 ### Anti-nuke (`/antinuke`)
 Server owner or bot owner.
+Exempt from every limit: the server owner, bot owners (the `OWNER_IDS` variable and the Developer Portal owner or team), extra owners added with `/owners`, the whitelist, and the bot itself.
 - `/antinuke`: show settings.
 - `/antinuke on` / `off`
 - `/antinuke punishment <ban|kick|strip|quarantine>`: what happens to a user who breaks a limit.
@@ -49,7 +52,7 @@ Server owner or bot owner.
 ### Quarantine (`/quarantine`)
 Needs Manage Server.
 - `/quarantine`: show the role and how many members are quarantined.
-- `/quarantine setup`: creates the Quarantine role if missing, hides every channel from it, and places it below the bot's role.
+- `/quarantine setup`: creates the Quarantine role if missing, hides every channel from it, creates a `#quarantine` appeal channel that only quarantined members can see, and places the role below the bot's role. Give your staff roles access to `#quarantine`, or they need Administrator to see it.
 - `/quarantine add <member> [reason]`
 - `/quarantine release <member>`: restores the member's saved roles.
 - `/quarantine list`
@@ -144,6 +147,8 @@ Main owner only. Extra owners get bot-owner commands but can't manage owners.
 
 Keep the bot's role **at the top** of the role list. Quarantine and punishments only work on roles below it. Put the Quarantine role just below the bot's role.
 
+Quarantine also needs **Manage Channels** to hide channels and create `#quarantine`.
+
 ### 3. Environment variables
 Set these in your host's variable settings, or in a `.env` file next to `main.py`.
 
@@ -185,6 +190,9 @@ If you don't set `DATABASE_URL`, the nuke list stays in a local file. That works
 
 ## Troubleshooting
 
+- **A quarantined member can't see `#quarantine`:** the quarantine role needs access to it. Run `/quarantine setup` again after the bot's role is at the top.
+- **Staff can't see `#quarantine`:** give their roles View Channel on it, or they need Administrator.
+
 - **Commands missing:** slash commands can take up to an hour to appear after a restart. Prefix commands work right away.
 - **`DISCORD_TOKEN is not set`:** add the token variable and restart.
 - **Database says "local file only":** check `DATABASE_URL`, and that the database accepts connections from your host.
@@ -193,4 +201,4 @@ If you don't set `DATABASE_URL`, the nuke list stays in a local file. That works
 
 ## Licence
 
-No license
+No license at all
