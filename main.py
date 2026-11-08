@@ -600,9 +600,6 @@ class AntiNuke(commands.Cog):
             # Verified bots are trusted by default, so they need much stronger evidence
             # (this is how a hijacked popular bot gets caught).
             need = NUKEDB_VERIFIED_MIN_ACTIONS if verified else NUKEDB_MIN_ACTIONS
-            if not verified and key in cfg["limits"]:
-                # It already broke its limit for this action, so one more than the limit is enough evidence
-                need = min(need, cfg["limits"][key] + 1)
             if len(seen) < need:
                 return await skip(
                     f"only {len(seen)} destructive action(s) seen, it needs {need}"
@@ -679,8 +676,9 @@ class AntiNuke(commands.Cog):
                 except discord.HTTPException:
                     note = "role removal failed (check my role position)"
                 await dm_action(member, guild, "Your roles were removed", reason, f"Action: {note}")
-        await self.log(guild, cfg, "Dangerous permissions granted",
+        self.log(guild, cfg, "Dangerous permissions granted",
                  f"{user.mention} (`{user.id}`) gave dangerous permissions: {', '.join(perms)}\nPunishment: {note}")
+
     async def kick_bot(self, guild, bot_id, reason):
         try:
             await guild.kick(discord.Object(id=bot_id), reason=reason)
