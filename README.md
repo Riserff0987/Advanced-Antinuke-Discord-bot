@@ -62,6 +62,7 @@ Protects a Discord server from raids, nukes and bot abuse.
 - `/botspam set`: Set the trigger: more than <messages> in <seconds> from one bot.
 - `/botspam status`: Show Bot Spam Guard settings.
 - `/botstatus`: Change the bot's status and activity (bot owner only).
+- `/bug`: Report a bug to the bot owners.
 - `/cases`: Premium: per-user moderation history.
 - `/clearwarns`: Clear all warnings for a member.
 - `/discordautomod`: Show the Discord AutoMod rules this bot manages.
@@ -117,10 +118,7 @@ Protects a Discord server from raids, nukes and bot abuse.
 - `/raid threshold`: Trigger raid mode on more than <joins> joins within <seconds>.
 - `/redeem`: Premium: redeem a premium key.
 - `/report`: Premium: weekly security report with charts.
-- `/request`: Send a feature request to the server owner.
-- `/requests`: Show open feature requests.
-- `/requests close`: Mark a request as done or dealt with.
-- `/requests open`: Show open feature requests.
+- `/request`: Suggest a feature to the bot owners.
 - `/roleadd`: Give a role to a member.
 - `/rolebackup`: Premium: save and restore member roles.
 - `/roleremove`: Remove a role from a member.
@@ -130,6 +128,9 @@ Protects a Discord server from raids, nukes and bot abuse.
 - `/setup`: Guided setup for anti-nuke, anti-spam and anti-raid.
 - `/slowburn`: Owner: destructive actions per hour before a punishment.
 - `/slowmode`: Set channel slowmode in seconds (0 to disable).
+- `/suggestions`: Bot owners: open suggestions and bug reports.
+- `/suggestions close`: Bot owners: close an item.
+- `/suggestions open`: Bot owners: open suggestions and bug reports.
 - `/support`: Get the support server link.
 - `/tempban`: Premium: temporary bans that expire automatically.
 - `/timeout`: Timeout a member (e.g. 10m, 2h, 1d).
