@@ -3941,47 +3941,79 @@ class WarnPunish(commands.Cog):
         await ctx.send(f"Rule for {count} warnings removed.")
 
 
-class FeatureRequests(commands.Cog):
-    """Members send feature requests; the owner sees them in the log channel and in /requests."""
+async def bot_owner_check(ctx):
+    if await ctx.bot.is_owner(ctx.author):
+        return True
+    raise commands.NotOwner()
+
+
+async def dm_bot_owners(bot, embed):
+    """DM an embed to every bot owner. Suggestions and bug reports go to the bot owners, not to server owners."""
+    for uid in list(BOT_OWNER_IDS):
+        try:
+            user = bot.get_user(uid) or await bot.fetch_user(uid)
+            await user.send(embed=embed)
+        except discord.HTTPException:
+            pass
+
+
+def add_suggestion(kind, ctx, text):
+    items = BOT_SETTINGS.data.setdefault("suggestions", [])
+    sid = (items[-1]["id"] + 1) if items else 1
+    items.append({"id": sid, "kind": kind, "user": ctx.author.id, "guild": ctx.guild.id if ctx.guild else 0,
+                  "text": text[:500], "ts": int(time.time()), "status": "open"})
+    BOT_SETTINGS.save()
+    return sid
+
+
+class SuggestionsAndBugs(commands.Cog):
+    """Members send feature suggestions and bug reports to the bot owners. Bot owners review them with /suggestions."""
 
     def __init__(self, bot):
         self.bot = bot
         self.last = {}
 
-    @commands.hybrid_command(name="request", description="Send a feature request to the server owner.")
-    async def request(self, ctx, *, idea: str):
-        if ctx.guild is None:
-            return
+    async def send_to_owners(self, ctx, kind, text, cooldown):
         now = time.time()
-        if now - self.last.get(ctx.author.id, 0) < 600:
-            return await ctx.send("You can send one request every 10 minutes.")
-        self.last[ctx.author.id] = now
-        cfg = STORE.get(ctx.guild.id)
-        reqs = cfg.setdefault("requests", [])
-        rid = (reqs[-1]["id"] + 1) if reqs else 1
-        reqs.append({"id": rid, "user": ctx.author.id, "text": idea.strip()[:300], "ts": int(now), "status": "open"})
-        STORE.save()
-        await ctx.send(f"Request #{rid} sent to the server owner.")
-        await mod_log(ctx.guild, f"Feature request #{rid}", f"{ctx.author.mention}: {idea.strip()[:300]}")
+        key = (ctx.author.id, kind)
+        if now - self.last.get(key, 0) < cooldown:
+            return await ctx.send(f"Please wait {cooldown // 60} minutes between {kind} reports.")
+        self.last[key] = now
+        sid = add_suggestion(kind, ctx, text)
+        embed = discord.Embed(title=f"{'Bug report' if kind == 'bug' else 'Feature suggestion'} #{sid}",
+                              description=text[:1500], color=0xE74C3C if kind == "bug" else 0x3498DB)
+        embed.add_field(name="From", value=f"<@{ctx.author.id}> in {ctx.guild.name if ctx.guild else 'a DM'}")
+        await dm_bot_owners(self.bot, embed)
+        await ctx.send(f"Thanks. Your {kind} report #{sid} was sent to the bot owners.")
 
-    @commands.hybrid_group(name="requests", fallback="open", invoke_without_command=True)
-    @owner_only_guild()
-    async def requests(self, ctx):
-        """Show open feature requests."""
-        open_reqs = [r for r in STORE.get(ctx.guild.id).get("requests", []) if r["status"] == "open"]
-        text = "\n".join(f"**#{r['id']}** <@{r['user']}>: {r['text']}" for r in open_reqs[-15:]) or "No open requests."
-        await ctx.send(embed=discord.Embed(title="Open feature requests", description=text[:4000], color=0x3498DB))
+    @commands.hybrid_command(name="request", description="Suggest a feature to the bot owners.")
+    async def request(self, ctx, *, idea: str):
+        await self.send_to_owners(ctx, "feature", idea.strip(), 600)
 
-    @requests.command(name="close")
-    @owner_only_guild()
-    async def requests_close(self, ctx, request_id: int):
-        """Mark a request as done or dealt with."""
-        for r in STORE.get(ctx.guild.id).get("requests", []):
-            if r["id"] == request_id:
-                r["status"] = "closed"
-                STORE.save()
-                return await ctx.send(f"Request #{request_id} closed.")
-        await ctx.send("No request with that number.")
+    @commands.hybrid_command(name="bug", description="Report a bug to the bot owners.")
+    async def bug(self, ctx, *, what_happened: str):
+        await self.send_to_owners(ctx, "bug", what_happened.strip(), 300)
+
+    @commands.hybrid_group(name="suggestions", fallback="open", invoke_without_command=True)
+    @commands.check(bot_owner_check)
+    async def suggestions(self, ctx):
+        """Bot owners: open suggestions and bug reports."""
+        open_items = [i for i in BOT_SETTINGS.data.get("suggestions", []) if i["status"] == "open"]
+        text = "\n".join(f"**#{i['id']}** [{i['kind']}] <@{i['user']}>: {i['text'][:120]}"
+                         for i in open_items[-15:]) or "Nothing open."
+        await ctx.send(embed=discord.Embed(title="Open suggestions and bug reports", description=text[:4000],
+                                           color=0x9B59B6))
+
+    @suggestions.command(name="close")
+    @commands.check(bot_owner_check)
+    async def suggestions_close(self, ctx, item_id: int):
+        """Bot owners: close an item."""
+        for i in BOT_SETTINGS.data.get("suggestions", []):
+            if i["id"] == item_id:
+                i["status"] = "closed"
+                BOT_SETTINGS.save()
+                return await ctx.send(f"#{item_id} closed.")
+        await ctx.send("No item with that number.")
 
 
 SLOW_ACTIONS = ("ban", "kick", "channel_delete", "role_delete", "member_prune")
@@ -4102,7 +4134,7 @@ class Bot(commands.Bot):
         await self.add_cog(PremiumStubs(self))
         await self.add_cog(BotTools(self))
         await self.add_cog(WarnPunish(self))
-        await self.add_cog(FeatureRequests(self))
+        await self.add_cog(SuggestionsAndBugs(self))
         await self.add_cog(SlowBurn(self))
         await self.add_cog(AntiRaid(self))
         await load_ai(self)
@@ -4242,7 +4274,7 @@ async def prefix(ctx, new_prefix: str = None):
 
 HELP_COLOR = 0x5865F2
 HELP_OWNER_COGS = {"ActivityLog", "Premium", "NukeBotDB", "BotOwners", "BotTools"}  # hidden from everyone except the bot owner
-HELP_OWNER_COMMANDS = {"botstatus"}
+HELP_OWNER_COMMANDS = {"suggestions", "botstatus"}
 HELP_SECTIONS = [  # (cog name, label, emoji, short description)
     ("AntiNuke", "Anti-nuke", "🛡️", "Stops mass bans, deletions and other nukes. Server owner or bot owner."),
     ("Moderation", "Moderation", "🔨", "Moderation and role commands. Each needs its own permission."),
@@ -4261,7 +4293,7 @@ HELP_SECTIONS = [  # (cog name, label, emoji, short description)
     ("BotTools", "Bot tools", "⚙️", "Error alerts and onboarding DMs. Bot owner only."),
     ("PremiumStubs", "Premium features", "💎", "These need premium. Using one shows how to get it."),
     ("WarnPunish", "Warning rules", "⚠️", "Owner sets what happens at a number of warnings."),
-    ("FeatureRequests", "Feature requests", "💡", "Members send requests; the owner reviews them."),
+    ("SuggestionsAndBugs", "Suggestions and bug reports", "💡", "Send ideas or bugs to the bot owners."),
     ("SlowBurn", "Slow attacks", "🐢", "Catches destructive actions spread over an hour."),
     (None, "General", "ℹ️", "Info and utility commands."),
 ]
