@@ -181,7 +181,7 @@ NUKEDB_SYNC_CHANNEL = _int_env("NUKEDB_SYNC_CHANNEL")
 NUKEDB_PEER_ID = _int_env("NUKEDB_PEER_ID")
 
 # Shared PostgreSQL storage (preferred over the sync channel). Example:
-# DATABASE_URL=postgresql://user:password@host:5432/dbname
+# DATABASE_URL=your PostgreSQL connection string
 NUKEDB_DSN = os.getenv("DATABASE_URL", "").strip()
 try:
     import asyncpg
@@ -930,6 +930,7 @@ class Moderation(commands.Cog):
         STORE.save()
         await dm_action(member, ctx.guild, "You were warned", reason, f"Warning #{len(w)}", 0xF1C40F)
         await ctx.send(f"Warned {member.mention} (warning #{len(w)}): {reason}")
+        await apply_warn_punishment(ctx, member, len(w))
         await mod_log(ctx.guild, "Warn", f"{member.mention} (#{len(w)}) by {ctx.author.mention}\n{reason}")
 
     @commands.hybrid_command(description="Show a member's warnings.")
@@ -3668,10 +3669,17 @@ def bot_setting(key):
     return bool(BOT_SETTINGS.data.get(key, key in ("error_alerts", "onboarding")))
 
 
+ERROR_HOOKS = []  # the AI module (autofix.py) adds its handler here when it is loaded
+
+
 async def report_error(where, error):
     """Print an unexpected error, and DM the bot owners (at most once a minute, if enabled)."""
     print(f"[error] {where}: {error!r}")
-    await maybe_autofix(where, error)
+    for hook in ERROR_HOOKS:
+        try:
+            await hook(where, error)
+        except Exception as exc:
+            print(f"[ai] error hook failed: {exc!r}", flush=True)
     if not bot_setting("error_alerts"):
         return
     now = time.monotonic()
@@ -3768,635 +3776,263 @@ def prune_state(bot, max_age=3600):
 
 
 import io
-# ---------------- AI auto-fix (runs only after an unexpected error, no approval step) ----------------
+# ---------------- GitHub sync: pushes the bot file and a generated README after every applied change ----------------
 
-import glob
+import base64
 import sys
-import traceback
 
-AUTOFIX_ENABLED = os.getenv("AUTOFIX", "on").lower() != "off"
-AUTOFIX_MAX_PER_DAY = 3
-AUTOFIX_COOLDOWN = 30 * 60  # seconds between attempts
-AUTOFIX_TOKEN_BUDGET = 60000  # estimated tokens per day, across all providers
-AUTOFIX_CONTEXT_LINES = 60  # lines either side of the failing line are sent, not the whole file
-AUTOFIX_MAX_CALLS = 2  # models tried per error, not every model
-AUTOFIX_BACKUPS = 5
-AUTOFIX_PROVIDERS = [
-    # (name, URL, key variable, fallback models if the provider's list can't be read, request format)
-    ("gemini", "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent", "GEMINI_API_KEY",
-     ["gemini-flash-latest"], "gemini"),
-    ("groq", "https://api.groq.com/openai/v1/chat/completions", "GROQ_API_KEY",
-     ["llama-3.1-8b-instant"], "openai"),
-    ("openrouter", "https://openrouter.ai/api/v1/chat/completions", "OPENROUTER_API_KEY",
-     [], "openai"),
-]
-AUTOFIX_SKIP_WORDS = ("tts", "image", "live", "embedding", "preview", "omni", "guard", "whisper", "audio")
-_SECRET_RE = re.compile(r"[A-Za-z0-9_-]{24,}\.[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{20,}|postgres(?:ql)?://\S+")
+GITHUB_REPO = os.getenv("GITHUB_REPO", "")  # owner/name, for example Riserff0987/Advanced-Antinuke-Discord-bot
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")  # fine-grained token: this repo only, Contents read and write
+GITHUB_FILE = os.getenv("GITHUB_FILE", "main.py")
+_SECRET_RE = re.compile(r"[A-Za-z0-9_-]{24,}\.[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{20,}|postgres(?:ql)?://[^\s:/@]+:(?!password\b)[^\s@/]{3,}@")
 
 
-def autofix_redact(text):
-    """Remove anything that looks like a Discord token or a database URL before text leaves the bot."""
-    return _SECRET_RE.sub("[REDACTED]", text)
+def today_str():
+    return time.strftime("%Y-%m-%d", time.gmtime())
 
 
-def autofix_combos():
-    """Provider and model pairs to try today: the provider's current list (or the fallback), minus models that
-    returned 404 today."""
-    cache = BOT_SETTINGS.data.get("model_cache", {})
-    dead = BOT_SETTINGS.data.get("dead_models", {})
-    today = autofix_today()
-    combos = []
-    exhausted = BOT_SETTINGS.data.get("exhausted", {})
-    for name, url, key_var, fallback, fmt in AUTOFIX_PROVIDERS:
-        key = os.getenv(key_var)
-        if not key or exhausted.get(name) == autofix_today():
-            continue
-        for model in cache.get(name, {}).get("models") or fallback:
-            if dead.get(f"{name}/{model}") != today:
-                combos.append((name, url, key, model, fmt))
-    return combos
-
-
-def autofix_parse(fmt, data, prompt):
-    """Pull the reply text and the token count out of either provider's response format."""
-    if fmt == "gemini":
-        parts = data["candidates"][0]["content"]["parts"]
-        text = "".join(p.get("text", "") for p in parts)
-        tokens = (data.get("usageMetadata") or {}).get("totalTokenCount") or (len(prompt) + len(text)) // 4
-    else:
-        message = data["choices"][0]["message"]
-        text = message.get("content") or ""  # some reasoning models return null here
-        if isinstance(text, list):
-            text = "".join(part.get("text", "") for part in text if isinstance(part, dict))
-        tokens = (data.get("usage") or {}).get("total_tokens") or (len(prompt) + len(text)) // 4
-    return text, tokens
-
-
-async def refresh_model_lists():
-    """Once a day, ask each provider which models it serves now, so retired models drop out by themselves.
-    OpenRouter: only its free models with a context window of 32k tokens or more are used (no credit needed)."""
-    import aiohttp
-    cache = BOT_SETTINGS.data.setdefault("model_cache", {})
-    today = autofix_today()
-    async with aiohttp.ClientSession() as session:
-        for name, _url, key_var, _fallback, _fmt in AUTOFIX_PROVIDERS:
-            key = os.getenv(key_var)
-            if not key or cache.get(name, {}).get("day") == today:
-                continue
-            try:
-                if name == "gemini":
-                    req_url, headers = "https://generativelanguage.googleapis.com/v1beta/models", {"x-goog-api-key": key}
-                elif name == "groq":
-                    req_url, headers = "https://api.groq.com/openai/v1/models", {"Authorization": f"Bearer {key}"}
-                else:
-                    req_url, headers = "https://openrouter.ai/api/v1/models", {"Authorization": f"Bearer {key}"}
-                async with session.get(req_url, headers=headers, timeout=aiohttp.ClientTimeout(total=30)) as resp:
-                    if resp.status != 200:
-                        continue
-                    data = await resp.json()
-                if name == "gemini":
-                    ids = [m["name"].split("/", 1)[1] for m in data.get("models", [])
-                           if "generateContent" in m.get("supportedGenerationMethods", [])
-                           and "flash" in m["name"] and not any(w in m["name"] for w in AUTOFIX_SKIP_WORDS)]
-                elif name == "groq":
-                    ids = [m["id"] for m in data.get("data", [])
-                           if "llama" in m["id"] and not any(w in m["id"] for w in AUTOFIX_SKIP_WORDS)]
-                else:
-                    big = [m for m in data.get("data", [])
-                           if str(m.get("id", "")).endswith(":free") and (m.get("context_length") or 0) >= 32000
-                           and not any(w in m["id"] for w in AUTOFIX_SKIP_WORDS)]
-                    big.sort(key=lambda m: m.get("context_length") or 0, reverse=True)
-                    ids = [m["id"] for m in big]
-                if name != "openrouter":
-                    ids = sorted(set(ids), reverse=True)
-                ids = ids[:3]
-                if ids:
-                    cache[name] = {"day": today, "models": ids}
-            except Exception:
-                continue
-    BOT_SETTINGS.save()
-
-
-async def autofix_call(prompt):
-    """Try up to AUTOFIX_MAX_CALLS models, starting after the one that last worked.
-    A model that returns 404 is skipped for the rest of the day. On a rate limit (429) it waits as the provider
-    asks, then retries that model once. Returns (label, text, tokens), or (None, reasons, 0) if all failed."""
-    import aiohttp
-    await refresh_model_lists()
-    combos = autofix_combos()
-    if not combos:
-        return None, "no model is available right now (keys missing, or every model failed today)", 0
-    start = BOT_SETTINGS.data.get("autofix_start", 0) % len(combos)
-    reasons = []
-    for i in range(min(AUTOFIX_MAX_CALLS, len(combos))):
-        idx = (start + i) % len(combos)
-        name, url_t, key, model, fmt = combos[idx]
-        if BOT_SETTINGS.data.get("exhausted", {}).get(name) == autofix_today():
-            continue
-        if fmt == "gemini":
-            url = url_t.format(model=model)
-            headers = {"x-goog-api-key": key}
-            payload = {"contents": [{"parts": [{"text": prompt}]}],
-                       "generationConfig": {"maxOutputTokens": 2000}}
-        else:
-            url = url_t
-            headers = {"Authorization": f"Bearer {key}"}
-            payload = {"model": model, "messages": [{"role": "user", "content": prompt}], "max_tokens": 2000}
-        for attempt in range(2):
-            try:
-                async with aiohttp.ClientSession() as session:
-                    async with session.post(url, headers=headers, json=payload,
-                                            timeout=aiohttp.ClientTimeout(total=120)) as resp:
-                        if resp.status == 429:
-                            body = (await resp.text())[:400].lower()
-                            if "quota" in body or "per day" in body:
-                                BOT_SETTINGS.data.setdefault("exhausted", {})[name] = autofix_today()
-                                BOT_SETTINGS.save()
-                                reasons.append(f"{name}: daily quota used up for today")
-                                break
-                            if attempt == 0:
-                                await asyncio.sleep(min(60, int(resp.headers.get("Retry-After", "20") or 20)))
-                                continue
-                        if resp.status != 200:
-                            detail = autofix_redact((await resp.text())[:300].replace("\n", " "))
-                            reasons.append(f"{name}/{model}: HTTP {resp.status} {detail}")
-                            if resp.status == 404:
-                                BOT_SETTINGS.data.setdefault("dead_models", {})[f"{name}/{model}"] = autofix_today()
-                                BOT_SETTINGS.save()
-                            break
-                        data = await resp.json()
-                text, tokens = autofix_parse(fmt, data, prompt)
-                BOT_SETTINGS.data["autofix_start"] = idx
-                BOT_SETTINGS.save()
-                return f"{name}/{model}", text, tokens
-            except Exception as exc:
-                reasons.append(f"{name}/{model}: {type(exc).__name__}")
-                break
-    return None, "; ".join(reasons), 0
-
-
-def autofix_clean(text):
-    text = text.strip()
-    if text.startswith("```"):
-        text = text.split("\n", 1)[1] if "\n" in text else text
-        text = text.rsplit("```", 1)[0]
-    return text.strip("\n")
-
-
-def autofix_failing_line(error, path):
-    """The line in this file where the error happened, or None if the error came from a library."""
-    frames = [fr for fr in traceback.extract_tb(error.__traceback__) if os.path.basename(fr.filename) == os.path.basename(path)]
-    return frames[-1].lineno if frames else None
-
-
-def autofix_is_code_error(error):
-    """Invalid Form Body (400, code 50035) means the bot sent bad data, which is a code bug. Other Discord errors
-    (permissions, rate limits, outages) are left alone."""
-    return getattr(error, "status", None) == 400 and getattr(error, "code", None) == 50035
-
-
-async def maybe_autofix(where, error):
-    """After an unexpected error in this file: send only the code around it, check the reply, splice it in,
-    back up the old file, restart. Guards: real code errors, daily limit, token budget, cooldown, checks."""
-    try:
-        if not AUTOFIX_ENABLED or not isinstance(error, BaseException) or not autofix_combos():
-            return
-        if isinstance(error, discord.HTTPException) and not autofix_is_code_error(error):
-            return  # permissions, rate limits and outages are not code bugs
-        if isinstance(error, (commands.CommandNotFound, commands.CheckFailure,
-                              commands.UserInputError, commands.NotOwner)) or type(error).__name__ == "NotPremium":
-            return
-        path = os.path.abspath(sys.argv[0])
-        line_no = autofix_failing_line(error, path)
-        if line_no is None:
-            return  # the error came from discord.py or another library, not from this file
-        st = BOT_SETTINGS.data.setdefault("autofix", {"day": "", "count": 0, "last": 0, "tokens": 0})
-        today = autofix_today()
-        if st.get("day") != today:
-            st.update({"day": today, "count": 0, "tokens": 0})
-        if st["count"] >= AUTOFIX_MAX_PER_DAY or time.time() - st.get("last", 0) < AUTOFIX_COOLDOWN:
-            return
-        if st["tokens"] >= AUTOFIX_TOKEN_BUDGET:
-            return
-        st["count"] += 1  # counted before any call, so failures can't cause repeated attempts
-        st["last"] = time.time()
-        BOT_SETTINGS.save()
-        with open(path, encoding="utf-8") as f:
-            source = f.read()
-        lines = source.split("\n")
-        start = max(1, line_no - AUTOFIX_CONTEXT_LINES)
-        end = min(len(lines), line_no + AUTOFIX_CONTEXT_LINES)
-        snippet = "\n".join(lines[start - 1:end])
-        tb = autofix_redact("".join(traceback.format_exception(type(error), error, error.__traceback__)))
-        prompt = (
-            "A Python discord.py bot hit this error in " + where + ":\n" + tb +
-            "\nThe failing line is " + str(line_no) + ". Here are lines " + str(start) + " to " + str(end) +
-            " of the file:\n" + autofix_redact(snippet) +
-            "\n\nFix the bug with the smallest change. Return ONLY the corrected lines " + str(start) + " to " +
-            str(end) + ", with no markdown and no explanation."
-        )
-        label, text, tokens = await autofix_call(prompt)
-        st["tokens"] += tokens
-        BOT_SETTINGS.save()
-        if label is None:
-            await notify_owners(f"Auto-fix could not run after an error in {where}: {clip(text, 300)}")
-            return
-        new_lines = autofix_clean(text).split("\n")
-        new_source = "\n".join(lines[:start - 1] + new_lines + lines[end:])
-        problem = None
-        try:
-            compile(new_source, path, "exec")
-        except SyntaxError as exc:
-            problem = f"syntax error at line {exc.lineno}"
-        if problem is None and not (0.5 * len(snippet) <= len("\n".join(new_lines)) <= 2 * len(snippet)):
-            problem = "the change was too large"
-        if problem is None and ("class Bot(commands.Bot)" not in new_source or "bot.run(" not in new_source):
-            problem = "the bot's structure was missing from the result"
-        if problem is None and new_source.strip() == source.strip():
-            problem = "the AI returned the same code"
-        if problem:
-            await notify_owners(f"Auto-fix from {label} was rejected after an error in {where}: {problem}. The bot was not changed.")
-            return
-        backup = f"{path}.bak-{int(time.time())}"
-        with open(backup, "w", encoding="utf-8") as f:
-            f.write(source)
-        for old in sorted(glob.glob(path + ".bak-*"))[:-AUTOFIX_BACKUPS]:
-            os.remove(old)
-        tmp = path + ".autofix.tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            f.write(new_source)
-        os.replace(tmp, path)
-        BOT_SETTINGS.data.setdefault("autofix", {})["applied_day"] = autofix_today()
-        BOT_SETTINGS.save()
-        await notify_owners(f"Auto-fix from {label} was applied after an error in {where}. The bot restarts now. "
-                            f"The previous file is saved as {os.path.basename(backup)}.")
-        print(f"[autofix] applied from {label}; backup {backup}; restarting", flush=True)
-        asyncio.get_running_loop().call_later(3, lambda: os._exit(0))
-    except Exception as exc:
-        print(f"[autofix] could not run: {exc!r}", flush=True)
-
-
-# ---------------- /autofix: on-demand AI review, applied only after the owner confirms ----------------
-
-import datetime as _dtmod
-import hashlib
-from datetime import time as dt_time
-from zoneinfo import ZoneInfo
-
-SCHED_TZ = ZoneInfo("Asia/Kolkata")
-SCHED_ENABLED = os.getenv("AUTOFIX_SCHEDULE", "on").lower() != "off"
-SCHED_PROTECTED = ("class AntiNuke", "class Lockdown", "class Quarantine", "class MassGuard",
-                   "def punish", "def dangerous_punish", "def trusted", "def auto_lockdown", "def quarantine_member")
-
-
-def autofix_today():
-    """The day used for limits: Indian time, so the nightly run and the daily limits agree."""
-    return _dtmod.datetime.now(SCHED_TZ).strftime("%Y-%m-%d")
-
-
-AUTOFIX_CHUNK = 750  # lines per review request
-AUTOFIX_MAX_CHUNKS = 4  # up to 3000 lines in one review
-AUTOFIX_MAX_FIXES = 15
-AUTOFIX_BLOCK_RE = re.compile(r"FIX (\d+)-(\d+)\s*\nREASON:\s*(.*?)\n(.*?)\nEND FIX", re.S)
-AUTOFIX_REVIEW_PROMPT = (
-    "You are reviewing lines {start} to {end} of a Python discord.py bot file. Report only real bugs: "
-    "exceptions, wrong names, a missing await, wrong discord.py API use, or logic that clearly breaks a feature. "
-    "Ignore style and comments.\n"
-    "For each bug output exactly:\nFIX <first line>-<last line>\nREASON: <one sentence>\n"
-    "<corrected lines, same indentation, replacing exactly that range>\nEND FIX\n"
-    "If these lines have no bugs, output only: NO FIXES\n\n{numbered}"
-)
-
-
-def sched_state():
-    return BOT_SETTINGS.data.setdefault("sched", {"next_part": 1, "reviewed": [], "last": ""})
-
-
-def section_hash(chunk_lines):
-    return hashlib.sha256("\n".join(chunk_lines).encode("utf-8")).hexdigest()[:16]
-
-
-def sched_pending(lines, reviewed):
-    """Returns (total parts, [(part, [(start, end), ...]), ...]) listing only sections not reviewed yet."""
-    part_lines = AUTOFIX_CHUNK * AUTOFIX_MAX_CHUNKS
-    total = max(1, -(-len(lines) // part_lines))
-    out = []
-    for p in range(1, total + 1):
-        ps, pe = (p - 1) * part_lines, min(p * part_lines, len(lines))
-        secs = [(s, min(s + AUTOFIX_CHUNK, pe)) for s in range(ps, pe, AUTOFIX_CHUNK)]
-        out.append((p, [(a, b) for a, b in secs if section_hash(lines[a:b]) not in reviewed]))
-    return total, out
-
-
-async def sched_dm(bot, text=None, embed=None, view=None, file=None):
-    """DM every bot owner. Returns True if at least one message was sent."""
-    sent = False
-    for uid in list(BOT_OWNER_IDS):
-        try:
-            user = bot.get_user(uid) or await bot.fetch_user(uid)
-            await user.send(content=text, embed=embed, view=view, file=file)
-            sent = True
-        except (discord.HTTPException, AttributeError):
-            pass
-    return sent
-
-
-async def scheduled_review_run(bot):
-    """Nightly (00:00 IST): review one part that still has unreviewed sections, then apply the fixes if every
-    check passes. Changes to protection logic are proposed instead, and only one applied change per day."""
-    if not autofix_combos():
-        return
-    path = os.path.abspath(sys.argv[0])
-    with open(path, encoding="utf-8") as f:
+async def github_startup_sync():
+    """Runs once at startup: pushes the uploaded code and README if they differ from the repo."""
+    await asyncio.sleep(10)
+    with open(os.path.abspath(sys.argv[0]), encoding="utf-8") as f:
         source = f.read()
-    lines = source.split("\n")
-    st = sched_state()
-    today = autofix_today()
-    total, pending = sched_pending(lines, set(st["reviewed"]))
-    order = [((st["next_part"] - 1 + k) % total) + 1 for k in range(total)]
-    todo_by_part = dict(pending)
-    part = next((p for p in order if todo_by_part.get(p)), None)
-    if part is None:
-        st["last"] = f"{today}: every section is reviewed; nothing to do"
-        BOT_SETTINGS.save()
+    await github_sync(source, "Bot started with updated code")
+
+
+def build_readme():
+    """A README built from the bot's real command list, so it always matches the code."""
+    bot = globals().get("BOT_INSTANCE")
+    cmds = sorted(bot.tree.walk_commands(), key=lambda c: c.qualified_name) if bot else []
+    lines = ["# Advanced Anti-Nuke Discord Bot", "",
+             "Protects a Discord server from raids, nukes and bot abuse.", "", "## Commands", ""]
+    for c in cmds:
+        lines.append(f"- `/{c.qualified_name}`: {getattr(c, 'description', '') or ''}")
+    lines += ["", "Run `/setup` in your server to get started, and `/help` for the full list.", "",
+              f"_Updated automatically on {today_str()}._", ""]
+    return "\n".join(lines)
+
+
+async def github_put(session, path, content, message):
+    import base64
+    import aiohttp
+    api = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{path}"
+    headers = {"Authorization": f"Bearer {GITHUB_TOKEN}", "Accept": "application/vnd.github+json"}
+    sha = None
+    async with session.get(api, headers=headers, timeout=aiohttp.ClientTimeout(total=30)) as r:
+        if r.status == 200:
+            info = await r.json()
+            sha, remote_content = info["sha"], info["content"]
+        elif r.status != 404:
+            return f"read failed: HTTP {r.status}"
+    if sha and base64.b64decode(remote_content).decode("utf-8") == content:
+        return "unchanged"
+    body = {"message": message, "content": base64.b64encode(content.encode("utf-8")).decode("ascii")}
+    if sha:
+        body["sha"] = sha
+    async with session.put(api, headers=headers, json=body, timeout=aiohttp.ClientTimeout(total=30)) as r:
+        if r.status not in (200, 201):
+            return f"push failed: HTTP {r.status} {(await r.text())[:160]}"
+    return "pushed"
+
+
+async def github_sync(new_source, reason):
+    """Called after an applied change. Never blocks the restart: problems are reported to the owners."""
+    if not (GITHUB_REPO and GITHUB_TOKEN):
         return
-    st["next_part"] = part % total + 1
-    st_all = BOT_SETTINGS.data.setdefault("autofix", {"day": "", "count": 0, "last": 0, "tokens": 0})
-    if st_all.get("day") != today:
-        st_all.update({"day": today, "count": 0, "tokens": 0})
-    used, answered, fixes, notes = 0, 0, [], []
-    for a, b in todo_by_part[part]:
-        if st_all.get("tokens", 0) + used >= AUTOFIX_TOKEN_BUDGET:
-            notes.append("the daily token budget ran out; the rest waits for tomorrow")
-            break
-        numbered = "\n".join(f"{i + 1}: {lines[i]}" for i in range(a, b))
-        prompt = AUTOFIX_REVIEW_PROMPT.format(start=a + 1, end=b, numbered=numbered)
-        label, text, tokens = await autofix_call(autofix_redact(prompt))
-        if label is None:
-            notes.append(f"lines {a + 1}-{b} failed: {clip(text, 160)}")
-            continue
-        used += tokens
-        answered += 1
-        st["reviewed"].append(section_hash(lines[a:b]))
-        for m in AUTOFIX_BLOCK_RE.finditer(text):
-            fa, fb = int(m.group(1)), int(m.group(2))
-            body = autofix_clean(m.group(4))
-            if a + 1 <= fa <= fb <= b and body.strip():
-                fixes.append((fa, fb, m.group(3).strip(), body))
-    st["reviewed"] = st["reviewed"][-5000:]
-    st_all["tokens"] = st_all.get("tokens", 0) + used
-    BOT_SETTINGS.save()
-    if answered == 0:
-        st["last"] = f"{today}: part {part} not reviewed ({'; '.join(notes)})"
-        BOT_SETTINGS.save()
-        await sched_dm(bot, text=f"Scheduled review of part {part} did not run: {'; '.join(notes)}")
-        return
-    fixes.sort()
-    chosen, last_end = [], 0
-    for fa, fb, reason, body in fixes:
-        if fa <= last_end:
-            continue
-        chosen.append((fa, fb, reason, body))
-        last_end = fb
-    chosen = chosen[:AUTOFIX_MAX_FIXES]
-    if not chosen:
-        st["last"] = f"{today}: part {part} reviewed, no fixes" + (f" ({'; '.join(notes)})" if notes else "")
-        BOT_SETTINGS.save()
-        return
-    new_lines = list(lines)
-    for fa, fb, reason, body in reversed(chosen):
-        new_lines[fa - 1:fb] = body.split("\n")
-    new_source = "\n".join(new_lines)
-    problem = None
+    import aiohttp
     try:
-        compile(new_source, path, "exec")
-    except SyntaxError as exc:
-        problem = f"syntax error at line {exc.lineno}"
-    if problem is None and not (0.9 * len(source) <= len(new_source) <= 1.1 * len(source)):
-        problem = "the total change is too large"
-    if problem is None and ("class Bot(commands.Bot)" not in new_source or "bot.run(" not in new_source):
-        problem = "the bot's structure would be missing"
-    summary = "\n".join(f"Lines {fa}-{fb}: {reason}" for fa, fb, reason, _ in chosen)
-    if problem:
-        st["last"] = f"{today}: part {part}: {len(chosen)} fix(es) rejected: {problem}"
-        BOT_SETTINGS.save()
-        await sched_dm(bot, text=f"Scheduled review (part {part}): {len(chosen)} fix(es) rejected, {problem}. Nothing changed.")
+        if _SECRET_RE.search(new_source):
+            await notify_owners("GitHub push skipped: the bot file contains something that looks like a token.")
+            return
+        message = f"{reason} ({today_str()})"
+        async with aiohttp.ClientSession() as session:
+            code_result = await github_put(session, GITHUB_FILE, new_source, message)
+            readme_result = await github_put(session, "README.md", build_readme(), message)
+        if not (code_result == "unchanged" and readme_result == "unchanged"):
+            await notify_owners(f"GitHub sync after '{reason}': code {code_result}; README {readme_result}.")
+    except Exception as exc:
+        await notify_owners(f"GitHub sync failed after '{reason}': {clip(repr(exc), 200)}")
+
+
+async def load_ai(bot):
+    """Loads autofix.py from the folder the bot runs in. If the file is missing, the bot runs with no AI."""
+    path = os.path.join(os.path.dirname(os.path.abspath(sys.argv[0])), "autofix.py")
+    if not os.path.exists(path):
         return
-    touches_protection = any(p in "\n".join(lines[fa - 1:fb]) for fa, fb, _, _ in chosen for p in SCHED_PROTECTED)
-    applied_today = BOT_SETTINGS.data.get("autofix", {}).get("applied_day") == today
-    if touches_protection or applied_today:
-        why = "it touches protection logic" if touches_protection else "a change was already applied today"
-        proposal = "\n\n".join(
-            f"Lines {fa}-{fb}: {reason}\n--- was ---\n" + "\n".join(lines[fa - 1:fb]) + "\n--- becomes ---\n" + body
-            for fa, fb, reason, body in chosen)
-        owner = min(BOT_OWNER_IDS) if BOT_OWNER_IDS else None
-        view = AutofixConfirm(owner, source, new_source) if owner else None
-        embed = discord.Embed(title=f"Scheduled review: {len(chosen)} fix(es) proposed, not applied",
-                              description=f"Reason: {why}.\n" + summary[:3500], color=0xF1C40F)
-        await sched_dm(bot, embed=embed, view=view,
-                       file=discord.File(io.BytesIO(proposal.encode("utf-8")), filename="autofix-proposal.txt"))
-        st["last"] = f"{today}: part {part}: {len(chosen)} fix(es) proposed, not applied ({why})"
-        BOT_SETTINGS.save()
+    try:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("autofix", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        await module.install(bot, {
+            "BOT_SETTINGS": BOT_SETTINGS, "notify_owners": notify_owners, "clip": clip,
+            "report_error": report_error, "github_sync": github_sync,
+            "BOT_OWNER_IDS": BOT_OWNER_IDS, "ERROR_HOOKS": ERROR_HOOKS,
+        })
+        print("[ai] autofix.py loaded", flush=True)
+    except Exception as exc:
+        print(f"[ai] autofix.py could not load, running without AI: {exc!r}", flush=True)
+
+
+def owner_only_guild():
+    async def predicate(ctx):
+        if ctx.guild is not None and (ctx.author.id == ctx.guild.owner_id or await ctx.bot.is_owner(ctx.author)):
+            return True
+        raise commands.CheckFailure("Only the server owner can do that.")
+    return commands.check(predicate)
+
+
+async def apply_warn_punishment(ctx, member, count):
+    """Runs when a member reaches exactly `count` warnings and the owner set a rule for that count."""
+    rule = next((r for r in STORE.get(ctx.guild.id).get("warnpunish", []) if r["count"] == count), None)
+    if rule is None or member.bot or member.id == ctx.guild.owner_id or member.guild_permissions.administrator:
         return
-    backup = f"{path}.bak-{int(time.time())}"
-    with open(backup, "w", encoding="utf-8") as f:
-        f.write(source)
-    for old in sorted(glob.glob(path + ".bak-*"))[:-AUTOFIX_BACKUPS]:
-        os.remove(old)
-    tmp = path + ".autofix.tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        f.write(new_source)
-    os.replace(tmp, path)
-    BOT_SETTINGS.data.setdefault("autofix", {})["applied_day"] = today
-    st["last"] = f"{today}: part {part}: {len(chosen)} fix(es) applied, backup {os.path.basename(backup)}"
-    BOT_SETTINGS.save()
-    await sched_dm(bot, text=f"Scheduled review applied {len(chosen)} fix(es) to part {part}:\n{summary}\n"
-                             f"The bot restarts now. The previous file is saved as {os.path.basename(backup)}.")
-    print(f"[schedule] applied part {part}; backup {backup}; restarting", flush=True)
-    asyncio.get_running_loop().call_later(3, lambda: os._exit(0))
+    from datetime import timedelta
+    reason = f"Reached {count} warnings"
+    try:
+        if rule["action"] == "timeout":
+            await member.timeout(timedelta(minutes=rule.get("minutes") or 60), reason=reason)
+        elif rule["action"] == "kick":
+            await member.kick(reason=reason)
+        elif rule["action"] == "ban":
+            await member.ban(reason=reason, delete_message_days=0)
+        else:
+            return
+        await ctx.send(f"Warning rule applied to {member.mention}: {rule['action']} at {count} warnings.")
+        await mod_log(ctx.guild, "Warn punishment", f"{member.mention} reached {count} warnings: {rule['action']}.")
+    except discord.HTTPException as exc:
+        await mod_log(ctx.guild, "Warn punishment failed", f"{member.mention} ({count} warnings): {exc}")
 
 
-class AutofixConfirm(discord.ui.View):
-    """Apply or cancel one reviewed proposal. Only the owner who asked for it can press the buttons."""
-
-    def __init__(self, owner_id, base_source, new_source):
-        super().__init__(timeout=1800)
-        self.owner_id = owner_id
-        self.base_source = base_source
-        self.new_source = new_source
-        self.created = time.time()
-
-    async def interaction_check(self, interaction):
-        if interaction.user.id != self.owner_id:
-            await interaction.response.send_message("This proposal belongs to the owner who asked for it.", ephemeral=True)
-            return False
-        return True
-
-    @discord.ui.button(label="Apply and restart", style=discord.ButtonStyle.danger)
-    async def apply(self, interaction, button):
-        if time.time() - self.created > 1800:
-            self.stop()
-            return await interaction.response.edit_message(content="This proposal expired. Run /autofix again.", view=None)
-        path = os.path.abspath(sys.argv[0])
-        with open(path, encoding="utf-8") as f:
-            current = f.read()
-        if current != self.base_source:
-            self.stop()
-            return await interaction.response.edit_message(
-                content="The bot file changed since this review, so nothing was applied. Run /autofix again.", view=None)
-        backup = f"{path}.bak-{int(time.time())}"
-        with open(backup, "w", encoding="utf-8") as f:
-            f.write(current)
-        for old in sorted(glob.glob(path + ".bak-*"))[:-AUTOFIX_BACKUPS]:
-            os.remove(old)
-        tmp = path + ".autofix.tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            f.write(self.new_source)
-        os.replace(tmp, path)
-        self.stop()
-        await interaction.response.edit_message(
-            content=f"Applied. The previous file is saved as {os.path.basename(backup)}. The bot restarts now.", view=None)
-        print(f"[autofix] owner applied a reviewed change; backup {backup}; restarting", flush=True)
-        asyncio.get_running_loop().call_later(3, lambda: os._exit(0))
-
-    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
-    async def cancel(self, interaction, button):
-        self.stop()
-        await interaction.response.edit_message(content="Cancelled. Nothing was changed.", view=None)
-
-
-class AutoFix(commands.Cog):
-    """Owner-only: asks the AI to review the bot's code and proposes fixes. Nothing is applied without a confirm."""
+class WarnPunish(commands.Cog):
+    """Server owner sets what happens at a number of warnings."""
 
     def __init__(self, bot):
         self.bot = bot
-        if SCHED_ENABLED:
-            self.nightly_review.start()
 
-    async def cog_check(self, ctx):
-        if not await self.bot.is_owner(ctx.author):
-            raise commands.NotOwner()
-        return True
+    @commands.hybrid_group(name="warnpunish", fallback="show", invoke_without_command=True)
+    @owner_only_guild()
+    async def warnpunish(self, ctx):
+        """Show the warning rules."""
+        rules = sorted(STORE.get(ctx.guild.id).get("warnpunish", []), key=lambda r: r["count"])
+        text = "\n".join(f"{r['count']} warnings: {r['action']}" + (f" for {r.get('minutes') or 60} min" if r['action'] == "timeout" else "")
+                         for r in rules) or "No warning rules yet. Add one with /warnpunish add."
+        await ctx.send(embed=discord.Embed(title="Warning rules", description=text, color=0xF1C40F))
 
-    @tasks.loop(time=dt_time(0, 0, tzinfo=SCHED_TZ))
-    async def nightly_review(self):
-        await scheduled_review_run(self.bot)
+    @warnpunish.command(name="add")
+    @owner_only_guild()
+    async def warnpunish_add(self, ctx, count: commands.Range[int, 1, 100], action: Literal["timeout", "kick", "ban"],
+                             minutes: commands.Range[int, 1, 40320] = 60):
+        """Add a rule: at this many warnings, timeout (minutes), kick or ban the member."""
+        cfg = STORE.get(ctx.guild.id)
+        rules = [r for r in cfg.get("warnpunish", []) if r["count"] != count]
+        rules.append({"count": count, "action": action, "minutes": minutes})
+        cfg["warnpunish"] = rules
+        STORE.save()
+        await ctx.send(f"Rule added: at {count} warnings, {action}.")
 
-    @nightly_review.before_loop
-    async def before_nightly_review(self):
-        await self.bot.wait_until_ready()
+    @warnpunish.command(name="remove")
+    @owner_only_guild()
+    async def warnpunish_remove(self, ctx, count: commands.Range[int, 1, 100]):
+        """Remove the rule for this number of warnings."""
+        cfg = STORE.get(ctx.guild.id)
+        cfg["warnpunish"] = [r for r in cfg.get("warnpunish", []) if r["count"] != count]
+        STORE.save()
+        await ctx.send(f"Rule for {count} warnings removed.")
 
-    @nightly_review.error
-    async def nightly_review_error(self, error):
-        await report_error("nightly review", error)
 
-    @commands.hybrid_command(name="autofixstatus", description="Owner: scheduled AI review status.")
-    async def autofix_status(self, ctx):
-        """Show the scheduled review: what is reviewed, what is pending, and the last result."""
-        st = sched_state()
-        with open(os.path.abspath(sys.argv[0]), encoding="utf-8") as f:
-            lines = f.read().split("\n")
-        total, pending = sched_pending(lines, set(st["reviewed"]))
-        pend = ", ".join(f"part {p}: {len(todo)} section(s)" for p, todo in pending) or "none"
-        embed = discord.Embed(title="Scheduled AI review", color=0x3498DB)
-        embed.add_field(name="Schedule", value=("on, 00:00 IST" if SCHED_ENABLED else "off"), inline=False)
-        embed.add_field(name="Next part", value=str(st.get("next_part", 1)), inline=True)
-        embed.add_field(name="Pending sections", value=pend[:1024], inline=False)
-        embed.add_field(name="Last run", value=(st.get("last") or "never")[:1024], inline=False)
-        await ctx.send(embed=embed)
+class FeatureRequests(commands.Cog):
+    """Members send feature requests; the owner sees them in the log channel and in /requests."""
 
-    @commands.hybrid_command(name="autofix", description="Owner: AI review of the bot code. Applied only after you confirm.")
-    async def autofix(self, ctx, part: commands.Range[int, 1, 10] = 1):
-        """Review one part of the bot's code (3000 lines each). Proposed changes come by DM; nothing changes until you confirm."""
-        if not autofix_combos():
-            return await ctx.send("No AI key is set. Set GEMINI_API_KEY or GROQ_API_KEY first.")
-        st = BOT_SETTINGS.data.setdefault("autofix_review", {"day": "", "count": 0})
-        today = autofix_today()
-        if st.get("day") != today:
-            st.update({"day": today, "count": 0})
-        if st["count"] >= 1:
-            return await ctx.send("One part per day. Try again tomorrow.")
-        path = os.path.abspath(sys.argv[0])
-        with open(path, encoding="utf-8") as f:
-            source = f.read()
-        lines = source.split("\n")
-        part_lines = AUTOFIX_CHUNK * AUTOFIX_MAX_CHUNKS  # 3000 lines per part
-        total_parts = max(1, -(-len(lines) // part_lines))
-        if part > total_parts:
-            return await ctx.send(f"The file has {len(lines)} lines, which is {total_parts} part(s). Use part:1 to {total_parts}.")
-        part_start = (part - 1) * part_lines
-        part_end = min(part * part_lines, len(lines))
-        chunks = [(s, min(s + AUTOFIX_CHUNK, part_end)) for s in range(part_start, part_end, AUTOFIX_CHUNK)]
-        await ctx.send(f"Reviewing part {part} of {total_parts} (lines {part_start + 1} to {part_end}, "
-                       f"{len(chunks)} section(s)). This can take a few minutes.")
-        fixes, notes, used, any_ok = [], [], 0, False
-        for start, end in chunks:
-            spent = BOT_SETTINGS.data.get("autofix", {}).get("tokens", 0)
-            if spent + used >= AUTOFIX_TOKEN_BUDGET:
-                notes.append("the daily token budget ran out before the end of the file")
-                break
-            numbered = "\n".join(f"{i + 1}: {lines[i]}" for i in range(start, end))
-            prompt = AUTOFIX_REVIEW_PROMPT.format(start=start + 1, end=end, numbered=numbered)
-            label, text, tokens = await autofix_call(autofix_redact(prompt))
-            if label is None:
-                notes.append(f"lines {start + 1}-{end} failed: {clip(text, 120)}")
-                continue
-            used += tokens
-            any_ok = True
-            for m in AUTOFIX_BLOCK_RE.finditer(text):
-                a, b = int(m.group(1)), int(m.group(2))
-                body = autofix_clean(m.group(4))
-                if start + 1 <= a <= b <= end and body.strip():
-                    fixes.append((a, b, m.group(3).strip(), body))
-        if any_ok:
-            st["count"] += 1  # a part counts only when the AI actually answered, so failed runs don't use up the day
-            BOT_SETTINGS.save()
-        st_all = BOT_SETTINGS.data.setdefault("autofix", {"day": "", "count": 0, "last": 0, "tokens": 0})
-        if st_all.get("day") != today:
-            st_all.update({"day": today, "count": 0, "tokens": 0})
-        st_all["tokens"] = st_all.get("tokens", 0) + used
-        BOT_SETTINGS.save()
-        fixes.sort()
-        chosen, last_end = [], 0
-        for a, b, reason, body in fixes:
-            if a <= last_end:
-                continue  # overlaps an earlier fix, so keep the earlier one
-            chosen.append((a, b, reason, body))
-            last_end = b
-        chosen = chosen[:AUTOFIX_MAX_FIXES]
-        if not chosen:
-            extra = ("\nNotes: " + "; ".join(notes)) if notes else ""
-            return await ctx.send("The review found no fixes." + extra)
-        new_lines = list(lines)
-        for a, b, reason, body in reversed(chosen):
-            new_lines[a - 1:b] = body.split("\n")
-        new_source = "\n".join(new_lines)
-        problem = None
-        try:
-            compile(new_source, path, "exec")
-        except SyntaxError as exc:
-            problem = f"syntax error at line {exc.lineno}"
-        if problem is None and not (0.9 * len(source) <= len(new_source) <= 1.1 * len(source)):
-            problem = "the total change is too large"
-        if problem is None and ("class Bot(commands.Bot)" not in new_source or "bot.run(" not in new_source):
-            problem = "the bot's structure would be missing"
-        if problem:
-            return await ctx.send(f"The proposed fixes were rejected: {problem}. Nothing was changed.")
-        proposal = "\n\n".join(
-            f"Lines {a}-{b}: {reason}\n--- was ---\n" + "\n".join(lines[a - 1:b]) + "\n--- becomes ---\n" + body
-            for a, b, reason, body in chosen)
-        embed = discord.Embed(title=f"Proposed fixes: {len(chosen)}", color=0xF1C40F,
-                              description="\n".join(f"Lines {a}-{b}: {reason}" for a, b, reason, _ in chosen)[:4000])
-        if notes:
-            embed.add_field(name="Not fully reviewed", value="; ".join(notes)[:1000], inline=False)
-        embed.set_footer(text="Nothing has changed. Press Apply to back up the file and restart, or Cancel.")
-        view = AutofixConfirm(ctx.author.id, source, new_source)
-        try:
-            await ctx.author.send(embed=embed, view=view,
-                                  file=discord.File(io.BytesIO(proposal.encode("utf-8")), filename="autofix-proposal.txt"))
-        except discord.HTTPException:
-            return await ctx.send("I couldn't DM you the proposal. Turn on your DMs and run /autofix again (today's review is used).")
-        await ctx.send("Proposal sent to your DMs. Nothing has changed yet.")
+    def __init__(self, bot):
+        self.bot = bot
+        self.last = {}
+
+    @commands.hybrid_command(name="request", description="Send a feature request to the server owner.")
+    async def request(self, ctx, *, idea: str):
+        if ctx.guild is None:
+            return
+        now = time.time()
+        if now - self.last.get(ctx.author.id, 0) < 600:
+            return await ctx.send("You can send one request every 10 minutes.")
+        self.last[ctx.author.id] = now
+        cfg = STORE.get(ctx.guild.id)
+        reqs = cfg.setdefault("requests", [])
+        rid = (reqs[-1]["id"] + 1) if reqs else 1
+        reqs.append({"id": rid, "user": ctx.author.id, "text": idea.strip()[:300], "ts": int(now), "status": "open"})
+        STORE.save()
+        await ctx.send(f"Request #{rid} sent to the server owner.")
+        await mod_log(ctx.guild, f"Feature request #{rid}", f"{ctx.author.mention}: {idea.strip()[:300]}")
+
+    @commands.hybrid_group(name="requests", fallback="open", invoke_without_command=True)
+    @owner_only_guild()
+    async def requests(self, ctx):
+        """Show open feature requests."""
+        open_reqs = [r for r in STORE.get(ctx.guild.id).get("requests", []) if r["status"] == "open"]
+        text = "\n".join(f"**#{r['id']}** <@{r['user']}>: {r['text']}" for r in open_reqs[-15:]) or "No open requests."
+        await ctx.send(embed=discord.Embed(title="Open feature requests", description=text[:4000], color=0x3498DB))
+
+    @requests.command(name="close")
+    @owner_only_guild()
+    async def requests_close(self, ctx, request_id: int):
+        """Mark a request as done or dealt with."""
+        for r in STORE.get(ctx.guild.id).get("requests", []):
+            if r["id"] == request_id:
+                r["status"] = "closed"
+                STORE.save()
+                return await ctx.send(f"Request #{request_id} closed.")
+        await ctx.send("No request with that number.")
+
+
+SLOW_ACTIONS = ("ban", "kick", "channel_delete", "role_delete", "member_prune")
+
+
+class SlowBurn(commands.Cog):
+    """Catches slow attacks: destructive actions spread over an hour, one at a time."""
+
+    def __init__(self, bot):
+        self.bot = bot
+        self.hits = defaultdict(deque)
+
+    @commands.hybrid_command(name="slowburn", description="Owner: destructive actions per hour before a punishment.")
+    @owner_only_guild()
+    async def slowburn(self, ctx, count: commands.Range[int, 3, 500]):
+        antinuke = self.bot.get_cog("AntiNuke")
+        if antinuke is None:
+            return await ctx.send("Anti-nuke is not loaded.")
+        cfg = antinuke.store.get(ctx.guild.id)
+        cfg["slowburn"] = count
+        antinuke.store.save()
+        await ctx.send(f"Slow-attack limit set: {count} destructive actions per hour.")
+
+    @commands.Cog.listener()
+    async def on_audit_log_entry_create(self, entry):
+        if entry.guild is None or entry.user is None or entry.user.id == self.bot.user.id:
+            return
+        if entry.action.name not in SLOW_ACTIONS:
+            return
+        antinuke = self.bot.get_cog("AntiNuke")
+        if antinuke is None:
+            return
+        cfg = antinuke.store.get(entry.guild.id)
+        uid = entry.user.id
+        if antinuke.trusted(entry.guild, uid, cfg):
+            return
+        now = time.time()
+        q = self.hits[(entry.guild.id, uid)]
+        q.append(now)
+        while q and now - q[0] > 3600:
+            q.popleft()
+        limit = cfg.get("slowburn", 8)
+        if len(q) <= limit:
+            return
+        q.clear()
+        pk = (entry.guild.id, uid)
+        if time.monotonic() - antinuke.punished.get(pk, -999) < 60:
+            return
+        antinuke.punished[pk] = time.monotonic()
+        reason = f"Slow attack: more than {limit} destructive actions within an hour"
+        await antinuke.punish(entry.guild, uid, cfg, reason, force_ban=bool(entry.user.bot))
 
 
 class Bot(commands.Bot):
@@ -4434,6 +4070,10 @@ class Bot(commands.Bot):
         await self.wait_until_ready()
 
     async def setup_hook(self):
+        globals()["BOT_INSTANCE"] = self
+        if GITHUB_REPO and GITHUB_TOKEN and not globals().get("GITHUB_STARTED"):
+            globals()["GITHUB_STARTED"] = True
+            asyncio.get_running_loop().create_task(github_startup_sync())
         await DOCS.start(DOCS_FILES)
         self.flush_docs.start()
         self.prune_memory.start()
@@ -4461,8 +4101,11 @@ class Bot(commands.Bot):
         await self.add_cog(AutoModWatch(self))
         await self.add_cog(PremiumStubs(self))
         await self.add_cog(BotTools(self))
-        await self.add_cog(AutoFix(self))
+        await self.add_cog(WarnPunish(self))
+        await self.add_cog(FeatureRequests(self))
+        await self.add_cog(SlowBurn(self))
         await self.add_cog(AntiRaid(self))
+        await load_ai(self)
         import hashlib
         # sync only when the command list changed, so restarts don't use up Discord's command sync limits
         sig_source = sorted(
@@ -4598,7 +4241,7 @@ async def prefix(ctx, new_prefix: str = None):
 # ---------------- help menu ----------------
 
 HELP_COLOR = 0x5865F2
-HELP_OWNER_COGS = {"ActivityLog", "Premium", "NukeBotDB", "BotOwners", "BotTools", "AutoFix"}  # hidden from everyone except the bot owner
+HELP_OWNER_COGS = {"ActivityLog", "Premium", "NukeBotDB", "BotOwners", "BotTools"}  # hidden from everyone except the bot owner
 HELP_OWNER_COMMANDS = {"botstatus"}
 HELP_SECTIONS = [  # (cog name, label, emoji, short description)
     ("AntiNuke", "Anti-nuke", "🛡️", "Stops mass bans, deletions and other nukes. Server owner or bot owner."),
@@ -4615,9 +4258,11 @@ HELP_SECTIONS = [  # (cog name, label, emoji, short description)
     ("Quarantine", "Quarantine", "🚧", "Wick-style quarantine: hide channels from a member and restore their roles later. Needs Manage Server."),
     ("AutoModWatch", "AutoMod checks", "🛑", "Finds and disables AutoMod rules that block almost every message. Needs Manage Server."),
     ("ActivityLog", "Logs", "📜", "Activity logging. Bot owner only."),
-    ("AutoFix", "AI review", "🧪", "Owner only: AI code review. Fixes are applied only after you confirm."),
     ("BotTools", "Bot tools", "⚙️", "Error alerts and onboarding DMs. Bot owner only."),
     ("PremiumStubs", "Premium features", "💎", "These need premium. Using one shows how to get it."),
+    ("WarnPunish", "Warning rules", "⚠️", "Owner sets what happens at a number of warnings."),
+    ("FeatureRequests", "Feature requests", "💡", "Members send requests; the owner reviews them."),
+    ("SlowBurn", "Slow attacks", "🐢", "Catches destructive actions spread over an hour."),
     (None, "General", "ℹ️", "Info and utility commands."),
 ]
 
