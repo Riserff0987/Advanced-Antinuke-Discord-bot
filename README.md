@@ -1,204 +1,155 @@
-# project-Antinuke
-an discord antinuke and antiraid project.
-you can freely fork it and edit features and code using ai. 
-you can also use ai and update syntax if discord.py drops new update and this one doesn't work.
-[Join our Support server for buying premium features and reporting issues.We can work on your query faster when we get it through Discord server](https://discord.gg/GHyc7GyNvX)
-[![Deploy on Bot-Hosting](https://bot-hosting.net/assets/deploy-badge.svg)](https://bot-hosting.net/deploy?source=template&template=advanced-antinuke-discord-bot)
-# Nobara Antinuke (Free)
+# Advanced Anti-Nuke Discord Bot
 
-A Discord bot that protects servers from nukes, raids, spam, webhook floods and bot floods. It bans or quarantines attackers, shares a database of known nuke bots, and keeps your Discord AutoMod rules in sync with the bot's settings.
-
-## Features
-
-- **Anti-nuke:** limits mass channel, role, emoji and sticker creates and deletes, bans, kicks, renames and nickname changes. Punishes the user or bot responsible: ban, kick, strip dangerous roles, or quarantine.
-- **Dangerous permissions guard:** if someone who isn't trusted gives out admin, manage server, manage roles, manage channels, ban, kick or manage webhooks, their roles are stripped (bots are banned).
-- **Quarantine (Wick-style):** a Quarantine role that hides every channel, except a `#quarantine` appeal channel where quarantined members can see and talk. Roles are saved and restored on release.
-- **Protected from itself and owners:** the bot never punishes its own actions, and the server owner, bot owners and the whitelist are exempt from anti-nuke.
-- **Anti-raid:** detects join floods and responds with kick or ban, with optional account-age checks.
-- **Anti-spam, AutoMod and bad words:** the bot's own message filters (invites, links, bad words, mentions, spam).
-- **Discord AutoMod sync:** creates Discord's built-in AutoMod rules from your settings and logs what Discord blocks.
-- **AutoMod rule check:** disables any AutoMod rule that would block almost every message, from anyone, including trusted users. Runs automatically and can be scanned on demand with `/automodcheck`.
-- **App guard:** punishes the user behind a user-installed app that sends a burst of messages, and deletes their spam.
-- **Webhook guard:** deletes a webhook that bursts messages, removes its messages, and punishes its creator.
-- **Bot spam guard:** bans a bot account that floods messages.
-- **Nuke bot database:** lists bots caught nuking, bans them in every server, and shares the list across your bots through PostgreSQL.
-- **Logs:** sends message, member, voice, reaction, command, moderation and server events to channels you choose.
-- **Boosts:** announces boosts and gives reward roles.
-- **Setup wizard:** `/setup` configures protection in four steps.
+Protects a Discord server from raids, nukes and bot abuse.
 
 ## Commands
 
-All commands work as slash commands (`/command`) and as prefix commands (default `.`). Prefix can be changed per server with `/prefix`.
+- `/alerts`: Premium: owner DMs for serious incidents.
+- `/antinuke`: Show anti-nuke status.
+- `/antinuke limit`: Set allowed actions per window. Example: .antinuke limit ban 2
+- `/antinuke logchannel`: Set log channel (no argument clears it).
+- `/antinuke off`: Disable anti-nuke.
+- `/antinuke on`: Enable anti-nuke.
+- `/antinuke punishment`: Set punishment: ban, kick, strip (removes dangerous roles), or quarantine (hides every channel).
+- `/antinuke status`: Show anti-nuke status.
+- `/antinuke whitelist`: List whitelisted users.
+- `/antinuke whitelist add`: Whitelist a user.
+- `/antinuke whitelist list`: List whitelisted users.
+- `/antinuke whitelist remove`: Remove a user from the whitelist.
+- `/antinuke window`: Set the detection window in seconds (3-300).
+- `/antispam`: Show anti-spam settings.
+- `/antispam off`: Disable anti-spam.
+- `/antispam on`: Enable anti-spam.
+- `/antispam punishment`: Set the punishment. Minutes only applies to timeout.
+- `/antispam set`: Set the limit: more than <messages> in <seconds> triggers the punishment.
+- `/antispam status`: Show anti-spam settings.
+- `/apiinfo`: Show API and bot info.
+- `/appguard`: Show App Guard settings.
+- `/appguard debug`: Post raw details about app messages in this server, to diagnose App Guard.
+- `/appguard off`: Turn App Guard off.
+- `/appguard on`: Turn App Guard on.
+- `/appguard punishment`: Set the punishment for the user behind the app. Minutes only apply to timeout.
+- `/appguard set`: Set the trigger: more than <messages> in <seconds> from one app user.
+- `/appguard status`: Show App Guard settings.
+- `/autofix`: Owner: AI review of the bot code. Applied only after you confirm.
+- `/autofixstatus`: Owner: scheduled AI review status.
+- `/automod`: Show automod settings.
+- `/automod action`: What to do on a violation (message is always deleted).
+- `/automod badword`: List blocked words.
+- `/automod badword add`: Add a blocked word or phrase.
+- `/automod badword list`: List blocked words.
+- `/automod badword remove`: Remove a blocked word or phrase.
+- `/automod mentions`: Max user mentions allowed per message.
+- `/automod off`: Disable automod.
+- `/automod on`: Enable automod.
+- `/automod spam`: Spam threshold: more than <count> messages in <seconds>.
+- `/automod status`: Show automod settings.
+- `/automod timeout`: Timeout length in minutes when action is timeout.
+- `/automod toggle`: Toggle a filter on/off.
+- `/automodcheck`: Scan AutoMod rules and disable any that would block almost every message.
+- `/backup`: Premium: export or import bot settings.
+- `/ban`: Ban a user (mention or ID).
+- `/boost`: Show boost message and reward role settings.
+- `/boost addrole`: Give this role to members when they boost.
+- `/boost channel`: Set the boosters channel for boost messages.
+- `/boost disable`: Stop sending boost messages.
+- `/boost removerole`: Stop giving this role to boosters.
+- `/boost status`: Show boost message and reward role settings.
+- `/boost test`: Send a sample boost message to the boosters channel, as if this member boosted.
+- `/botspam`: Show Bot Spam Guard settings.
+- `/botspam off`: Turn Bot Spam Guard off.
+- `/botspam on`: Turn Bot Spam Guard on.
+- `/botspam set`: Set the trigger: more than <messages> in <seconds> from one bot.
+- `/botspam status`: Show Bot Spam Guard settings.
+- `/botstatus`: Change the bot's status and activity (bot owner only).
+- `/cases`: Premium: per-user moderation history.
+- `/clearwarns`: Clear all warnings for a member.
+- `/discordautomod`: Show the Discord AutoMod rules this bot manages.
+- `/discordautomod remove`: Delete every Discord AutoMod rule this bot manages.
+- `/discordautomod status`: Show the Discord AutoMod rules this bot manages.
+- `/discordautomod sync`: Create or update Discord AutoMod rules from this bot's word, mention and spam settings.
+- `/errors`: Turn error alerts to bot owners on or off.
+- `/forensics`: Premium: incident reports and replays.
+- `/help`: Show the help menu, or details for one command.
+- `/invite`: Get the bot invite link.
+- `/kick`: Kick a member.
+- `/lock`: Lock this channel for @everyone.
+- `/lockdown`: Premium: emergency lockdown and release.
+- `/logs`: Show where each type of log is sent.
+- `/logs bots`: Choose whether actions by bots are ignored.
+- `/logs disable`: Stop logging a category (or all of them).
+- `/logs ignore`: Toggle ignoring a channel for message and reaction logs.
+- `/logs set`: Send a log category (or all of them) to a channel.
+- `/logs status`: Show where each type of log is sent.
+- `/nukedb`: Show the malicious bot database summary.
+- `/nukedb add`: Manually list a bot. It is banned in every server it is in.
+- `/nukedb allow`: Protect a bot: it can never be auto-listed or banned by the database.
+- `/nukedb info`: Show details about a listed bot.
+- `/nukedb list`: List bots in the database, and the allowlisted bots with their names.
+- `/nukedb release`: Remove a bot from the database AND unban it in every server the database banned it in.
+- `/nukedb remove`: Remove a bot from the database (does not unban it).
+- `/nukedb status`: Show the malicious bot database summary.
+- `/nukedb sync`: Push this bot's whole database to the sync channel so the other bot gets it.
+- `/nukedb unallow`: Remove a bot from the allowlist.
+- `/onboarding`: Turn the setup DM to new server owners on or off.
+- `/owners`: List the main owner and extra owners.
+- `/owners add`: Give a user full bot-owner access.
+- `/owners list`: List the main owner and extra owners.
+- `/owners remove`: Remove an extra owner. Main owners can't be removed here.
+- `/ping`: Check the bot's latency.
+- `/prefix`: Show or change the bot prefix for this server.
+- `/privacy`: Premium: export or delete this server's stored data.
+- `/purge`: Delete recent messages (1-100).
+- `/quarantine`: Show the Quarantine role and how many members are quarantined.
+- `/quarantine add`: Quarantine a member manually.
+- `/quarantine list`: List quarantined members.
+- `/quarantine release`: Release a member and give back the roles they had before quarantine.
+- `/quarantine setup`: Create the Quarantine role, hide every channel from it, and place it under my role.
+- `/quarantine status`: Show the Quarantine role and how many members are quarantined.
+- `/raid`: Show anti-raid settings.
+- `/raid accountage`: Remove joiners whose account is younger than <days> (0 = off).
+- `/raid action`: What to do with joiners during a raid.
+- `/raid auto`: Turn automatic join-flood detection on or off.
+- `/raid duration`: How long raid mode lasts.
+- `/raid off`: Stop raid mode.
+- `/raid on`: Manually start raid mode.
+- `/raid status`: Show anti-raid settings.
+- `/raid threshold`: Trigger raid mode on more than <joins> joins within <seconds>.
+- `/redeem`: Premium: redeem a premium key.
+- `/report`: Premium: weekly security report with charts.
+- `/request`: Send a feature request to the server owner.
+- `/requests`: Show open feature requests.
+- `/requests close`: Mark a request as done or dealt with.
+- `/requests open`: Show open feature requests.
+- `/roleadd`: Give a role to a member.
+- `/rolebackup`: Premium: save and restore member roles.
+- `/roleremove`: Remove a role from a member.
+- `/screening`: Premium: new-member screening with a DM button.
+- `/securityaudit`: Premium: exportable security audit report.
+- `/securityscore`: Premium: server security score with fixes.
+- `/setup`: Guided setup for anti-nuke, anti-spam and anti-raid.
+- `/slowburn`: Owner: destructive actions per hour before a punishment.
+- `/slowmode`: Set channel slowmode in seconds (0 to disable).
+- `/support`: Get the support server link.
+- `/tempban`: Premium: temporary bans that expire automatically.
+- `/timeout`: Timeout a member (e.g. 10m, 2h, 1d).
+- `/trust`: Premium: trust a bot for specific actions only.
+- `/unban`: Unban a user by ID.
+- `/unlock`: Unlock this channel for @everyone.
+- `/untimeout`: Remove a member's timeout.
+- `/warn`: Warn a member.
+- `/warnings`: Show a member's warnings.
+- `/warnpunish`: Show the warning rules.
+- `/warnpunish add`: Add a rule: at this many warnings, timeout (minutes), kick or ban the member.
+- `/warnpunish remove`: Remove the rule for this number of warnings.
+- `/warnpunish show`: Show the warning rules.
+- `/webhookguard`: Show Webhook Guard settings.
+- `/webhookguard off`: Turn Webhook Guard off.
+- `/webhookguard on`: Turn Webhook Guard on.
+- `/webhookguard punishment`: Set the punishment for whoever created the webhook. Minutes only apply to timeout.
+- `/webhookguard set`: Set the trigger: more than <messages> in <seconds> from one webhook.
+- `/webhookguard status`: Show Webhook Guard settings.
 
-### General
-- `/help [command]`: help menu, or details for one command.
-- `/setup`: step-by-step setup wizard: protection level, log channel, trusted bots and people, and optional quarantine.
-- `/prefix [new_prefix]`: show or change the prefix. Needs Manage Server. `reset` restores `.`.
-- `/ping`: gateway and API latency.
-- `/apiinfo`: library and Python versions, uptime, server and user counts.
-- `/support`, `/invite`: support server and invite links.
+Run `/setup` in your server to get started, and `/help` for the full list.
 
-### Anti-nuke (`/antinuke`)
-Server owner or bot owner.
-Exempt from every limit: the server owner, bot owners (the `OWNER_IDS` variable and the Developer Portal owner or team), extra owners added with `/owners`, the whitelist, and the bot itself.
-- `/antinuke`: show settings.
-- `/antinuke on` / `off`
-- `/antinuke punishment <ban|kick|strip|quarantine>`: what happens to a user who breaks a limit.
-- `/antinuke limit <action> <count>`: allowed actions per window. Actions: `channel_create`, `channel_delete`, `channel_update`, `role_create`, `role_delete`, `role_update`, `ban`, `kick`, `webhook_create`, `bot_add`, `emoji_create`, `emoji_delete`, `sticker_create`, `sticker_delete`, `nick_change`.
-- `/antinuke window <seconds>`: the counting window.
-- `/antinuke logchannel <#channel>`
-- `/antinuke whitelist add <user>` / `remove <user>`: exempts a user or bot.
-
-### Quarantine (`/quarantine`)
-Needs Manage Server.
-- `/quarantine`: show the role and how many members are quarantined.
-- `/quarantine setup`: creates the Quarantine role if missing, hides every channel from it, creates a `#quarantine` appeal channel that only quarantined members can see, and places the role below the bot's role. Give your staff roles access to `#quarantine`, or they need Administrator to see it.
-- `/quarantine add <member> [reason]`
-- `/quarantine release <member>`: restores the member's saved roles.
-- `/quarantine list`
-
-### Moderation
-- `/ban <user> [reason]`, `/unban <user>`, `/kick <member> [reason]`
-- `/timeout <member> <duration> [reason]`, `/untimeout <member>`: durations like `10m`, `2h`, `1d`.
-- `/warn <member> [reason]`, `/warnings <member>`, `/clearwarns <member>`
-- `/purge <amount>`, `/slowmode <seconds>`, `/lock`, `/unlock`
-- `/roleadd <member> <role>`, `/roleremove <member> <role>`
-
-### AutoMod (`/automod`)
-The bot's own message filters. Needs Manage Server.
-- `/automod`: show settings. `on`, `off`, `toggle`
-- `/automod action <delete|warn|timeout>`, `/automod timeout <minutes>`
-- `/automod spam`, `/automod mentions`
-- `/automod badword add <word>` / `remove <word>`
-
-### Anti-spam (`/antispam`)
-Needs Manage Server.
-- `/antispam`, `on`, `off`, `set <messages> <seconds>`, `punishment <action> [minutes]`
-
-### Discord AutoMod (`/discordautomod`)
-Needs Manage Server. Creates rules named `[Bot] Words`, `[Bot] Mentions` and `[Bot] Spam` from your settings.
-- `/discordautomod`: list the rules the bot manages.
-- `/discordautomod sync`: create or update them. Run again after changing settings.
-- `/discordautomod remove`: delete them.
-
-### AutoMod checks (`/automodcheck`)
-Needs Manage Server. Scans every AutoMod rule, disables any that would block almost every message, and lists them.
-- `/automodcheck`: runs the scan now. Rules the bot's own `[Bot]` rules are skipped.
-
-The same check runs automatically whenever an AutoMod rule is created or changed, and every 10 minutes. A disabled rule is never deleted, so review it in Server Settings → AutoMod before turning it back on.
-
-### Anti-raid (`/raid`)
-Needs Manage Server.
-- `/raid`, `on`, `off`, `auto`, `action`, `threshold`, `duration`, `accountage`
-
-### App guard (`/appguard`)
-Needs Manage Server.
-- `/appguard`, `on`, `off`, `set <messages> <seconds>`, `punishment <timeout|kick|ban> [minutes]`, `debug <on|off>`
-
-### Webhook guard (`/webhookguard`)
-Needs Manage Server.
-- `/webhookguard`, `on`, `off`, `set <messages> <seconds>`, `punishment <timeout|kick|ban> [minutes]`
-
-### Bot spam guard (`/botspam`)
-Needs Manage Server.
-- `/botspam`, `on`, `off`, `set <messages> <seconds>`
-
-### Logs (`/logs`)
-Bot owner only.
-- `/logs`: show where each log type goes.
-- `/logs set <category|all> <#channel>`: categories are `messages`, `members`, `voice`, `server`, `moderation`, `commands`, `reactions`.
-- `/logs disable <category|all>`
-- `/logs bots <on|off>`: whether bot actions are logged.
-- `/logs ignore <#channel>`: stop logging a channel. Run again to undo.
-
-### Boosts (`/boost`)
-Needs Manage Server.
-- `/boost`, `channel <#channel>`, `disable`, `addrole <role>`, `removerole <role>`, `test <start|stop>`
-
-### Nuke bot database (`/nukedb`)
-Bot owner only.
-- `/nukedb`: summary. `list [page]`: listed bots and allowlisted bots with names.
-- `/nukedb info <bot id>`, `add <bot id> [reason]`, `remove <bot id>`
-- `/nukedb release <bot id>`: removes a listing and unbans the bot where it was banned.
-- `/nukedb allow <bot id>` / `unallow <bot id>`: protects a bot from being listed.
-- `/nukedb sync`: pushes the local list to the shared database.
-
-### Owners (`/owners`)
-Main owner only. Extra owners get bot-owner commands but can't manage owners.
-- `/owners`: list owners. `add <user>`, `remove <user>`
-
-### Bot status
-- `/botstatus`: bot owner only.
-
-## Setup
-
-### 1. Create the bot
-1. Create an application in the [Discord Developer Portal](https://discord.com/developers/applications).
-2. Under **Bot**, turn on **Server Members Intent** and **Message Content Intent**.
-3. Copy the bot token. Keep it secret.
-4. Invite the bot with the `bot` and `applications.commands` scopes, and Administrator or the permissions listed below.
-
-### 2. Permissions the bot needs
-- Manage Roles, Manage Channels, Manage Webhooks, Manage Messages
-- Ban Members, Kick Members, Moderate Members (timeouts)
-- View Audit Log, Read Message History
-- Manage Server (for Discord AutoMod rules and the AutoMod sync)
-- Send Messages, Embed Links
-
-Keep the bot's role **at the top** of the role list. Quarantine and punishments only work on roles below it. Put the Quarantine role just below the bot's role.
-
-Quarantine also needs **Manage Channels** to hide channels and create `#quarantine`.
-
-### 3. Environment variables
-Set these in your host's variable settings, or in a `.env` file next to `main.py`.
-
-| Variable | Required | What it does |
-|---|---|---|
-| `DISCORD_TOKEN` | yes | The bot token |
-| `OWNER_IDS` | no | Comma-separated user IDs with bot-owner commands. If empty, the Developer Portal owner or team is used. |
-| `DATABASE_URL` | no | PostgreSQL connection string for sharing the nuke list between bots. See below. |
-| `NUKEDB_MIN_ACTIONS` | no | Destructive actions needed before an unverified bot is listed. Default 5. |
-| `NUKEDB_VERIFIED_MIN_ACTIONS` | no | Same for verified bots. Default 10. |
-
-Data files are created automatically next to `main.py`. Keep them when you update the bot: `config.json`, `nukedb.json`, `owners.json`, `quarantine.json`.
-
-### 4. Install and run
-```bash
-pip install -r requirements.txt
-python main.py
-```
-Set the startup file to `main.py`. The bot needs `discord.py` 2.7.1 or newer.
-
-## Shared nuke database (PostgreSQL)
-
-Each person running the bot should use **their own** database. Don't share one, since it holds your listed bots and anyone with the connection string can change it.
-
-1. Create a free PostgreSQL database. [Supabase](https://supabase.com) and [Neon](https://neon.tech) both offer free tiers.
-2. Copy the connection string: `postgresql://user:password@host:5432/dbname`.
-3. Set it as `DATABASE_URL` on your host.
-4. Restart. The `nukedb` schema is created automatically.
-5. Run `/nukedb`. It should say **PostgreSQL (connected)**.
-
-If you don't set `DATABASE_URL`, the nuke list stays in a local file. That works for one bot on one host. You only lose sharing it with other bots.
-
-## Security
-
-- **Never commit your token or `DATABASE_URL`.** Keep them in host variables or a `.env` file.
-- Add a `.gitignore` that excludes `.env` and the data files (`config.json`, `nukedb.json`, `owners.json`, `quarantine.json`).
-- Use `.env.example` with placeholder values, so others know which variables to set.
-- Only give owner-level access (`OWNER_IDS`, `/owners add`) to people you fully trust. Owners can list or release nuke bots, which bans or unbans bots in every server the bot is in.
-
-## Troubleshooting
-
-- **A quarantined member can't see `#quarantine`:** the quarantine role needs access to it. Run `/quarantine setup` again after the bot's role is at the top.
-- **Staff can't see `#quarantine`:** give their roles View Channel on it, or they need Administrator.
-
-- **Commands missing:** slash commands can take up to an hour to appear after a restart. Prefix commands work right away.
-- **`DISCORD_TOKEN is not set`:** add the token variable and restart.
-- **Database says "local file only":** check `DATABASE_URL`, and that the database accepts connections from your host.
-- **Punishments or quarantine fail:** check the bot's role position and permissions.
-- **`429 Too Many Requests` at startup:** the host's IP is temporarily blocked by Discord after repeated restarts. Stop the bot for 30 minutes or more, then start it once.
-
-## Licence
-
-No license at all
+_Updated automatically on 2026-11-08._
