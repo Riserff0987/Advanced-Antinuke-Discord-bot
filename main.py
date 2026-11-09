@@ -564,6 +564,7 @@ class AntiNuke(commands.Cog):
             self.punished.pop(pk, None)  # failed: allow a retry on the next event
         if is_bot:
             asyncio.create_task(self.review_bot(guild, entry.user, joined_at, key))
+            asyncio.create_task(self.punish_adder(guild, entry.user.id, cfg))
 
         extra = ""
         if len(results) > 1:
@@ -574,6 +575,69 @@ class AntiNuke(commands.Cog):
             f"User: {entry.user.mention} (`{entry.user.id}`)\nAction: `{key}`\n"
             f"Punishment: `{mode_used}` ({'done' if results[0] else 'FAILED'}){extra}",
         ))
+
+    @commands.Cog.listener("on_member_join")
+    async def record_bot_join(self, member):
+        """The bot's own record of who added each bot. Taken when the bot joins, and kept with the server settings."""
+        if not member.bot:
+            return
+        await asyncio.sleep(3)  # give Discord a moment to write the audit entry
+        try:
+            async for e in member.guild.audit_logs(limit=10, action=discord.AuditLogAction.bot_add):
+                if e.target is not None and e.target.id == member.id and e.user is not None:
+                    if e.user.bot:
+                        return
+                    cfg = self.store.get(member.guild.id)
+                    cfg.setdefault("bot_adders", {})[str(member.id)] = {"adder": e.user.id, "ts": int(time.time())}
+                    self.store.save()
+                    await self.log(member.guild, cfg, "Bot added",
+                                   f"{member.mention} was added by {e.user.mention} (`{e.user.id}`).")
+                    return
+        except discord.HTTPException:
+            return
+
+    @commands.Cog.listener("on_audit_log_entry_create")
+    async def record_bot_adder(self, entry):
+        """The bot's own record of who added each bot, written the moment it happens."""
+        if entry.action != discord.AuditLogAction.bot_add or entry.target is None or entry.user is None or entry.guild is None:
+            return
+        BOT_SETTINGS.data.setdefault("bot_adders", {})[f"{entry.guild.id}:{entry.target.id}"] = {
+            "adder": entry.user.id, "ts": int(time.time())}
+        recs = BOT_SETTINGS.data["bot_adders"]
+        while len(recs) > 2000:
+            recs.pop(next(iter(recs)))  # keep the latest 2000
+        BOT_SETTINGS.save()
+
+    async def find_adder(self, guild, bot_id):
+        """The bot's own record first. The audit log is only a fallback, for bots added before that record existed."""
+        rec = BOT_SETTINGS.data.get("bot_adders", {}).get(f"{guild.id}:{bot_id}")
+        if rec:
+            return rec["adder"]
+        try:
+            async for e in guild.audit_logs(limit=200, action=discord.AuditLogAction.bot_add):
+                if e.target is not None and e.target.id == bot_id and e.user is not None:
+                    return e.user.id
+        except discord.HTTPException:
+            pass
+        return None
+
+    async def punish_adder(self, guild, bot_id, cfg):
+        """The person who added a bot that got punished gets the same punishment, unless they are trusted."""
+        adder_id = await self.find_adder(guild, bot_id)
+        if adder_id is None:
+            return
+        member = guild.get_member(adder_id)
+        if (member is not None and member.bot) or self.trusted(guild, adder_id, cfg):
+            return
+        pk = (guild.id, adder_id)
+        now = time.monotonic()
+        if now - self.punished.get(pk, -999) < 30:
+            return
+        self.punished[pk] = now
+        ok = await self.punish(guild, adder_id, cfg, "Added a bot that nuked the server")
+        await self.log(guild, cfg, "Adder punished",
+                       f"<@{adder_id}> (`{adder_id}`) added a bot that nuked the server. "
+                       f"Punishment: {'done' if ok else 'FAILED'}")
 
     async def review_bot(self, guild, bot_user, joined_at, key=None):
         """After a bot was banned, decide if the evidence is strong enough to list it in the database."""
@@ -3959,6 +4023,7 @@ def add_suggestion(kind, ctx, text):
     sid = (items[-1]["id"] + 1) if items else 1
     items.append({"id": sid, "kind": kind, "user": ctx.author.id, "guild": ctx.guild.id if ctx.guild else 0,
                   "text": text[:500], "ts": int(time.time()), "status": "open"})
+    del items[:-500]  # keep the latest 500 so storage can not grow without limit
     BOT_SETTINGS.save()
     return sid
 
