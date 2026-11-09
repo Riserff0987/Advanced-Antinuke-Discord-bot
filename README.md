@@ -153,4 +153,4 @@ Protects a Discord server from raids, nukes and bot abuse.
 
 Run `/setup` in your server to get started, and `/help` for the full list.
 
-_Updated automatically on 2026-11-08._
+_Updated automatically on 2026-11-09._
