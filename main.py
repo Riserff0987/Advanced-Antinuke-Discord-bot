@@ -740,7 +740,7 @@ class AntiNuke(commands.Cog):
                 except discord.HTTPException:
                     note = "role removal failed (check my role position)"
                 await dm_action(member, guild, "Your roles were removed", reason, f"Action: {note}")
-        self.log(guild, cfg, "Dangerous permissions granted",
+        await self.log(guild, cfg, "Dangerous permissions granted",
                  f"{user.mention} (`{user.id}`) gave dangerous permissions: {', '.join(perms)}\nPunishment: {note}")
 
     async def kick_bot(self, guild, bot_id, reason):
@@ -3861,16 +3861,71 @@ async def github_startup_sync():
 
 
 def build_readme():
-    """A README built from the bot's real command list, so it always matches the code."""
+    """The full README: support link, deploy button, hosting guide, requirements and features.
+    The commands section is generated from the bot's real command list, so it always matches the code."""
     bot = globals().get("BOT_INSTANCE")
     cmds = sorted(bot.tree.walk_commands(), key=lambda c: c.qualified_name) if bot else []
-    lines = ["# Advanced Anti-Nuke Discord Bot", "",
-             "Protects a Discord server from raids, nukes and bot abuse.", "", "## Commands", ""]
-    for c in cmds:
-        lines.append(f"- `/{c.qualified_name}`: {getattr(c, 'description', '') or ''}")
-    lines += ["", "Run `/setup` in your server to get started, and `/help` for the full list.", "",
-              f"_Updated automatically on {today_str()}._", ""]
-    return "\n".join(lines)
+    command_lines = [f"- `/{c.qualified_name}`: {getattr(c, 'description', '') or ''}" for c in cmds]
+    parts = [
+        "# Advanced Anti-Nuke Discord Bot",
+        "",
+        "Protects a Discord server from raids, nukes, bot abuse and mass destruction.",
+        "",
+        "**Support server:** https://discord.gg/GHyc7GyNvX",
+        "",
+        "[![Deploy on Bot-Hosting](https://bot-hosting.net/assets/deploy-badge.svg)]"
+        "(https://bot-hosting.net/deploy?source=template&template=advanced-antinuke-discord-bot)",
+        "",
+        "## What it protects against",
+        "",
+        "- **Nukes:** mass channel, role, emoji and sticker creation or deletion, mass bans and kicks, mass renames.",
+        "- **Slow attacks:** destructive actions spread over an hour (`/slowburn`).",
+        "- **Dangerous permission grants:** anyone who gives admin, manage server, manage roles, ban, kick or webhook rights is stripped at once.",
+        "- **Bots:** an added bot that nukes is banned, and the person who added it is punished too (unless trusted).",
+        "- **Webhooks and AutoMod:** webhook spam is deleted, and AutoMod rules that block almost everything are disabled.",
+        "- **Raids and spam:** join floods, account age checks, message bursts and bot spam.",
+        "- **Nuke bots:** known nuke bots are shared through the nuke-bot database and banned on sight.",
+        "- **Warnings:** the owner can set punishments at a number of warnings (`/warnpunish`).",
+        "",
+        "## Requirements",
+        "",
+        "| Item | Needed? | What it is for |",
+        "|---|---|---|",
+        "| `DISCORD_TOKEN` | **Required** | The bot's login token from the Discord Developer Portal. |",
+        "| Bot permissions | **Required** | Administrator is simplest. At minimum: View Audit Log, Manage Roles, Manage Channels, Ban Members, Kick Members, Moderate Members, Manage Webhooks, Manage Messages. |",
+        "| Bot role above staff roles | **Required** | Discord won't let the bot punish anyone whose role is higher than its own. |",
+        "| `OWNER_IDS` | Optional | Extra bot owner IDs, comma-separated. The Developer Portal owner is always an owner. |",
+        "| `DATABASE_URL` | Optional | PostgreSQL connection string. Without it, data is kept in local files. |",
+        "| `GITHUB_REPO` and `GITHUB_TOKEN` | Optional | Publishes the code and README to a GitHub repo after changes. |",
+        "| `GEMINI_API_KEY`, `OPENROUTER_API_KEY`, `GROQ_API_KEY` | Optional | Only for the AI features in `autofix.py`. Without them there is no AI. |",
+        "| `AUTOFIX` and `AUTOFIX_SCHEDULE` | Optional | Set to `off` to turn off AI error fixes and the nightly review. |",
+        "| `NUKEDB_MIN_ACTIONS` | Optional | How many destructive actions get a bot listed in the nuke-bot database (default 5). |",
+        "",
+        "## How to host it on bot-hosting.net",
+        "",
+        "1. Click the **Deploy on Bot-Hosting** button above, or create a Python bot there and upload the files.",
+        "2. Upload `main.py` (required). Upload `autofix.py` only if you want the AI features.",
+        "3. Set the startup file to `main.py`, and make sure the host runs Python 3.11 or newer.",
+        "4. Add the variables from the table in the bot's settings. Start with `DISCORD_TOKEN`.",
+        "5. Start the bot. The console should show `Logged in as ...`.",
+        "6. Invite the bot with Administrator, or with the permissions listed above, and put its role at the top of the role list.",
+        "7. In your server, run `/setup` and follow the four steps. Then run `/help`.",
+        "",
+        "## Specialities",
+        "",
+        "- **Works without AI.** The protection does not depend on any AI service. AI is optional and only helps with bugs in the bot's own code.",
+        "- **Safe AI changes.** Protection code is never changed by AI, and every AI fix is reported to the owner before it is applied.",
+        "- **Feature suggestions and bug reports** go to the bot owners by DM (`/request` and `/bug`).",
+        "- **Premium features** such as forensics, reports, role backup and keys are listed in `/help` and tell you how to get premium.",
+        "",
+        "## Commands",
+        "",
+    ] + command_lines + [
+        "",
+        f"_This README is updated automatically whenever the bot code changes ({today_str()})._",
+        "",
+    ]
+    return "\n".join(parts)
 
 
 async def github_put(session, path, content, message):
