@@ -3899,7 +3899,8 @@ def build_readme():
         "| Bot role above staff roles | **Required** | Discord won't let the bot punish anyone whose role is higher than its own. |",
         "| `OWNER_IDS` | Optional | Extra bot owner IDs, comma-separated. The Developer Portal owner is always an owner. |",
         "| `DATABASE_URL` | Optional | PostgreSQL connection string. Without it, data is kept in local files. |",
-        "| `GITHUB_REPO` and `GITHUB_TOKEN` | Optional | Publishes the code and README to a GitHub repo after changes. |",
+        "| `GITHUB_REPO` and `GITHUB_TOKEN` | Optional | Publishes the code, README and LICENSE to a GitHub repo after changes. |",
+        "| `DISCORDBOTLIST_TOKEN` | Optional | Posts the bot's commands to discordbotlist.com on each start. |",
         "| `NUKEDB_MIN_ACTIONS` | Optional | How many destructive actions get a bot listed in the nuke-bot database (default 5). |",
         "",
         "## How to host it on bot-hosting.net",
@@ -4251,18 +4252,89 @@ UPVOTE_CHANCE = 0.08  # about 1 command in 12
 
 
 def upvote_tip():
-    return f"Enjoying the bot? Upvote it on Discord Bot List: {UPVOTE_URL}"
+    return (f"Enjoying the bot? Upvote it on Discord Bot List: {UPVOTE_URL}\n"
+            "Join the support server (https://discord.gg/GHyc7GyNvX) and get premium to remove this message.")
+
+
+def apply_votes(votes, state, access, now):
+    """Pure logic for the vote check: grants 24 hours from each NEW vote, ignores votes older than a day."""
+    from datetime import datetime
+    newest = state.get("last", 0)
+    for v in votes:
+        try:
+            ts = datetime.fromisoformat(str(v["timestamp"]).replace("Z", "+00:00")).timestamp()
+        except (KeyError, ValueError):
+            continue
+        if ts <= state.get("last", 0):
+            continue
+        newest = max(newest, ts)
+        if now - ts < 86400:
+            access[str(v["user_id"])] = ts + 86400
+    state["last"] = newest
+    for uid in [u for u, exp in access.items() if exp <= now]:
+        access.pop(uid, None)
+    return access
 
 
 class UpvoteTips(commands.Cog):
-    """Sometimes adds an upvote link after a command. Bot owners are never shown it."""
+    """Upvote link and support-server offer after a user's 2nd and 3rd command, then every 15th.
+    A confirmed vote turns the tips off for that user for 24 hours. Bot owners never see tips."""
 
     def __init__(self, bot):
         self.bot = bot
+        self.counts = {}
+        self.poll_votes.start()
+
+    def cog_unload(self):
+        self.poll_votes.cancel()
+
+    def due(self, user_id):
+        n = self.counts.get(user_id, 0) + 1
+        self.counts[user_id] = n
+        return n in (2, 3) or (n > 3 and n % 15 == 0)
+
+    def has_vote_access(self, user_id):
+        return time.time() < BOT_SETTINGS.data.get("vote_access", {}).get(str(user_id), 0)
+
+    @tasks.loop(minutes=5)
+    async def poll_votes(self):
+        """Checks discordbotlist.com for new votes (its vote endpoint returns the most recent 500)."""
+        if not DISCORDBOTLIST_TOKEN or self.bot.user is None:
+            return
+        import aiohttp
+        async with aiohttp.ClientSession() as session:
+            async with session.get(f"https://discordbotlist.com/api/v1/bots/{self.bot.user.id}/upvotes",
+                                   headers={"Authorization": DISCORDBOTLIST_TOKEN},
+                                   timeout=aiohttp.ClientTimeout(total=30)) as resp:
+                if resp.status != 200:
+                    print(f"[vote] vote check returned HTTP {resp.status}", flush=True)
+                    return
+                data = await resp.json()
+        state = BOT_SETTINGS.data.setdefault("vote_state", {"last": 0})
+        access = BOT_SETTINGS.data.setdefault("vote_access", {})
+        apply_votes(data.get("upvotes", []), state, access, time.time())
+        BOT_SETTINGS.save()
+
+    @poll_votes.before_loop
+    async def before_poll_votes(self):
+        await self.bot.wait_until_ready()
+
+    @poll_votes.error
+    async def poll_votes_error(self, error):
+        await report_error("vote check", error)
+
+    @commands.hybrid_command(name="vote", description="Upvote the bot, and get 24 hours without tips.")
+    async def vote(self, ctx):
+        left = BOT_SETTINGS.data.get("vote_access", {}).get(str(ctx.author.id), 0) - time.time()
+        if left > 0:
+            await ctx.send(f"Thanks for voting! Tips are off for you for {int(left // 3600)} more hour(s).")
+        else:
+            await ctx.send(f"Upvote the bot here: {UPVOTE_URL}\nYour 24 hours start within 5 minutes of voting.")
 
     @commands.Cog.listener()
     async def on_app_command_completion(self, interaction, command):
-        if interaction.user.id in BOT_OWNER_IDS or random.random() >= UPVOTE_CHANCE:
+        if interaction.user.id in BOT_OWNER_IDS or self.has_vote_access(interaction.user.id) \
+                or not self.due(interaction.user.id):
             return
         try:
             await interaction.followup.send(upvote_tip(), ephemeral=True)
@@ -4271,7 +4343,8 @@ class UpvoteTips(commands.Cog):
 
     @commands.Cog.listener()
     async def on_command_completion(self, ctx):
-        if ctx.author.id in BOT_OWNER_IDS or random.random() >= UPVOTE_CHANCE:
+        if ctx.author.id in BOT_OWNER_IDS or self.has_vote_access(ctx.author.id) \
+                or not self.due(ctx.author.id):
             return
         try:
             await ctx.send(upvote_tip())
