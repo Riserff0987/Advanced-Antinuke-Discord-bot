@@ -3773,6 +3773,7 @@ async def send_onboarding(guild):
         ),
         color=0x5865F2,
     )
+    e.add_field(name="Support the bot", value=UPVOTE_URL, inline=False)
     try:
         await guild.owner.send(embed=e)
     except discord.HTTPException:
@@ -3865,6 +3866,7 @@ def build_readme():
     The commands section is generated from the bot's real command list, so it always matches the code."""
     bot = globals().get("BOT_INSTANCE")
     cmds = sorted(bot.tree.walk_commands(), key=lambda c: c.qualified_name) if bot else []
+    cmds = [c for c in cmds if type(getattr(c, "binding", None) or getattr(c, "cog", None)).__name__ != "AutoFix"]
     command_lines = [f"- `/{c.qualified_name}`: {getattr(c, 'description', '') or ''}" for c in cmds]
     parts = [
         "# Advanced Anti-Nuke Discord Bot",
@@ -3872,6 +3874,7 @@ def build_readme():
         "Protects a Discord server from raids, nukes, bot abuse and mass destruction.",
         "",
         "**Support server:** https://discord.gg/GHyc7GyNvX",
+        "**Upvote:** https://discordbotlist.com/bots/nobara",
         "",
         "[![Deploy on Bot-Hosting](https://bot-hosting.net/assets/deploy-badge.svg)]"
         "(https://bot-hosting.net/deploy?source=template&template=advanced-antinuke-discord-bot)",
@@ -3897,8 +3900,6 @@ def build_readme():
         "| `OWNER_IDS` | Optional | Extra bot owner IDs, comma-separated. The Developer Portal owner is always an owner. |",
         "| `DATABASE_URL` | Optional | PostgreSQL connection string. Without it, data is kept in local files. |",
         "| `GITHUB_REPO` and `GITHUB_TOKEN` | Optional | Publishes the code and README to a GitHub repo after changes. |",
-        "| `GEMINI_API_KEY`, `OPENROUTER_API_KEY`, `GROQ_API_KEY` | Optional | Only for the AI features in `autofix.py`. Without them there is no AI. |",
-        "| `AUTOFIX` and `AUTOFIX_SCHEDULE` | Optional | Set to `off` to turn off AI error fixes and the nightly review. |",
         "| `NUKEDB_MIN_ACTIONS` | Optional | How many destructive actions get a bot listed in the nuke-bot database (default 5). |",
         "",
         "## How to host it on bot-hosting.net",
@@ -3913,10 +3914,13 @@ def build_readme():
         "",
         "## Specialities",
         "",
-        "- **Works without AI.** The protection does not depend on any AI service. AI is optional and only helps with bugs in the bot's own code.",
-        "- **Safe AI changes.** Protection code is never changed by AI, and every AI fix is reported to the owner before it is applied.",
+        "- **Works on its own.** The protection needs no external service: only the Discord token and the permissions above.",
         "- **Feature suggestions and bug reports** go to the bot owners by DM (`/request` and `/bug`).",
         "- **Premium features** such as forensics, reports, role backup and keys are listed in `/help` and tell you how to get premium.",
+        "",
+        "## License",
+        "",
+        "MIT. See the LICENSE file.",
         "",
         "## Commands",
         "",
@@ -3926,6 +3930,59 @@ def build_readme():
         "",
     ]
     return "\n".join(parts)
+
+
+DISCORDBOTLIST_TOKEN = os.getenv("DISCORDBOTLIST_TOKEN", "")  # from discordbotlist.com, for the bot's commands
+
+
+async def post_commands_to_dbl(bot):
+    """Sends the bot's slash commands to discordbotlist.com, in the same format Discord uses.
+    AI commands are left out, the same as the README."""
+    import aiohttp
+    payload = []
+    for c in bot.tree.get_commands():
+        owner = getattr(c, "binding", None)
+        if owner is not None and type(owner).__name__ == "AutoFix":
+            continue
+        try:
+            payload.append(c.to_dict())
+        except TypeError:
+            payload.append(c.to_dict(bot.tree))
+    async with aiohttp.ClientSession() as session:
+        async with session.post(f"https://discordbotlist.com/api/v1/bots/{bot.user.id}/commands",
+                                headers={"Authorization": f"Bot {DISCORDBOTLIST_TOKEN}"}, json=payload,
+                                timeout=aiohttp.ClientTimeout(total=30)) as resp:
+            print(f"[dbl] commands posted: HTTP {resp.status}", flush=True)
+
+
+async def dbl_startup(bot):
+    await asyncio.sleep(60)  # let the commands finish syncing first
+    try:
+        await post_commands_to_dbl(bot)
+    except Exception as exc:
+        print(f"[dbl] post failed: {exc!r}", flush=True)
+
+
+def mit_license():
+    holder = GITHUB_REPO.split("/")[0] if "/" in GITHUB_REPO else "the author"
+    return (
+        "MIT License\n\n"
+        f"Copyright (c) 2026 {holder}\n\n"
+        "Permission is hereby granted, free of charge, to any person obtaining a copy\n"
+        "of this software and associated documentation files (the \"Software\"), to deal\n"
+        "in the Software without restriction, including without limitation the rights\n"
+        "to use, copy, modify, merge, publish, distribute, sublicense, and/or sell\n"
+        "copies of the Software, and to permit persons to whom the Software is\n"
+        "furnished to do so, subject to the following conditions:\n\n"
+        "The above copyright notice and this permission notice shall be included in all\n"
+        "copies or substantial portions of the Software.\n\n"
+        "THE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\n"
+        "IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\n"
+        "FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\n"
+        "AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,\n"
+        "WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN\n"
+        "CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.\n"
+    )
 
 
 async def github_put(session, path, content, message):
@@ -3964,6 +4021,7 @@ async def github_sync(new_source, reason):
         async with aiohttp.ClientSession() as session:
             code_result = await github_put(session, GITHUB_FILE, new_source, message)
             readme_result = await github_put(session, "README.md", build_readme(), message)
+            await github_put(session, "LICENSE", mit_license(), message)
         if not (code_result == "unchanged" and readme_result == "unchanged"):
             await notify_owners(f"GitHub sync after '{reason}': code {code_result}; README {readme_result}.")
     except Exception as exc:
@@ -4184,6 +4242,43 @@ class SlowBurn(commands.Cog):
         await antinuke.punish(entry.guild, uid, cfg, reason, force_ban=bool(entry.user.bot))
 
 
+# ---------------- upvote tips (owners never see them) ----------------
+
+import random
+
+UPVOTE_URL = "https://discordbotlist.com/bots/nobara"
+UPVOTE_CHANCE = 0.08  # about 1 command in 12
+
+
+def upvote_tip():
+    return f"Enjoying the bot? Upvote it on Discord Bot List: {UPVOTE_URL}"
+
+
+class UpvoteTips(commands.Cog):
+    """Sometimes adds an upvote link after a command. Bot owners are never shown it."""
+
+    def __init__(self, bot):
+        self.bot = bot
+
+    @commands.Cog.listener()
+    async def on_app_command_completion(self, interaction, command):
+        if interaction.user.id in BOT_OWNER_IDS or random.random() >= UPVOTE_CHANCE:
+            return
+        try:
+            await interaction.followup.send(upvote_tip(), ephemeral=True)
+        except discord.HTTPException:
+            pass
+
+    @commands.Cog.listener()
+    async def on_command_completion(self, ctx):
+        if ctx.author.id in BOT_OWNER_IDS or random.random() >= UPVOTE_CHANCE:
+            return
+        try:
+            await ctx.send(upvote_tip())
+        except discord.HTTPException:
+            pass
+
+
 class Bot(commands.Bot):
     async def is_owner(self, user):
         # Extra owners pass every bot-owner check (commands.is_owner, cog checks, etc.)
@@ -4223,6 +4318,8 @@ class Bot(commands.Bot):
         if GITHUB_REPO and GITHUB_TOKEN and not globals().get("GITHUB_STARTED"):
             globals()["GITHUB_STARTED"] = True
             asyncio.get_running_loop().create_task(github_startup_sync())
+        if DISCORDBOTLIST_TOKEN:
+            asyncio.get_running_loop().create_task(dbl_startup(self))
         await DOCS.start(DOCS_FILES)
         self.flush_docs.start()
         self.prune_memory.start()
@@ -4250,6 +4347,7 @@ class Bot(commands.Bot):
         await self.add_cog(AutoModWatch(self))
         await self.add_cog(PremiumStubs(self))
         await self.add_cog(BotTools(self))
+        await self.add_cog(UpvoteTips(self))
         await self.add_cog(WarnPunish(self))
         await self.add_cog(SuggestionsAndBugs(self))
         await self.add_cog(SlowBurn(self))
