@@ -4257,9 +4257,11 @@ def upvote_tip():
 
 
 def apply_votes(votes, state, access, now):
-    """Pure logic for the vote check: grants 24 hours from each NEW vote, ignores votes older than a day."""
+    """Grants 24 hours from each NEW vote, ignores votes older than a day, never counts a vote twice.
+    Returns (access, newly_granted_user_ids) so the bot can thank them."""
     from datetime import datetime
     newest = state.get("last", 0)
+    granted = []
     for v in votes:
         try:
             ts = datetime.fromisoformat(str(v["timestamp"]).replace("Z", "+00:00")).timestamp()
@@ -4269,11 +4271,39 @@ def apply_votes(votes, state, access, now):
             continue
         newest = max(newest, ts)
         if now - ts < 86400:
-            access[str(v["user_id"])] = ts + 86400
+            uid = str(v["user_id"])
+            if access.get(uid, 0) <= now:
+                granted.append(uid)
+            access[uid] = ts + 86400
     state["last"] = newest
     for uid in [u for u, exp in access.items() if exp <= now]:
         access.pop(uid, None)
-    return access
+    return access, granted
+
+
+# ---------------- command limit for members who have not upvoted ----------------
+
+GATE_FREE_USES = 3  # commands per 24 hours without an upvote
+GATE_WINDOW = 86400
+GATE_EXEMPT = {"help", "vote", "support", "invite", "request", "bug", "ping"}
+GATE_TEXT = ("You have used your {n} free commands for today. Upvote the bot to keep using it for 24 hours: {url}\n"
+             "Support server: https://discord.gg/GHyc7GyNvX")
+
+
+class VoteGateError(commands.CheckFailure):
+    pass
+
+
+def gate_decision(uses, user_id, name, staff, has_vote, now):
+    """True if the command may run. Staff, members with a vote, and exempt commands always may."""
+    if staff or has_vote or name in GATE_EXEMPT:
+        return True
+    q = [t for t in uses.get(user_id, []) if now - t < GATE_WINDOW]
+    allowed = len(q) < GATE_FREE_USES
+    if allowed:
+        q.append(now)
+    uses[user_id] = q
+    return allowed
 
 
 class UpvoteTips(commands.Cog):
@@ -4283,6 +4313,7 @@ class UpvoteTips(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.counts = {}
+        self.uses = {}
         self.poll_votes.start()
 
     def cog_unload(self):
@@ -4295,6 +4326,9 @@ class UpvoteTips(commands.Cog):
 
     def has_vote_access(self, user_id):
         return time.time() < BOT_SETTINGS.data.get("vote_access", {}).get(str(user_id), 0)
+
+    def gate(self, user_id, name, staff):
+        return gate_decision(self.uses, user_id, name, staff, self.has_vote_access(user_id), time.time())
 
     @tasks.loop(minutes=5)
     async def poll_votes(self):
@@ -4312,8 +4346,15 @@ class UpvoteTips(commands.Cog):
                 data = await resp.json()
         state = BOT_SETTINGS.data.setdefault("vote_state", {"last": 0})
         access = BOT_SETTINGS.data.setdefault("vote_access", {})
-        apply_votes(data.get("upvotes", []), state, access, time.time())
+        _, granted = apply_votes(data.get("upvotes", []), state, access, time.time())
         BOT_SETTINGS.save()
+        for uid in granted:
+            try:
+                user = self.bot.get_user(int(uid)) or await self.bot.fetch_user(int(uid))
+                await user.send(f"Thanks for upvoting {self.bot.user.name}! For the next 24 hours you get "
+                                f"unlimited commands and no tips. Support server: https://discord.gg/GHyc7GyNvX")
+            except (discord.HTTPException, ValueError):
+                pass
 
     @poll_votes.before_loop
     async def before_poll_votes(self):
@@ -4352,6 +4393,17 @@ class UpvoteTips(commands.Cog):
             pass
 
 
+async def vote_prefix_check(ctx):
+    cog = ctx.bot.get_cog("UpvoteTips")
+    if cog is None or ctx.author.id in BOT_OWNER_IDS:
+        return True
+    name = ctx.command.qualified_name if ctx.command else ""
+    staff = bool(ctx.guild and ctx.author.guild_permissions.manage_guild)
+    if cog.gate(ctx.author.id, name, staff):
+        return True
+    raise VoteGateError(GATE_TEXT.format(n=GATE_FREE_USES, url=UPVOTE_URL))
+
+
 class Bot(commands.Bot):
     async def is_owner(self, user):
         # Extra owners pass every bot-owner check (commands.is_owner, cog checks, etc.)
@@ -4386,8 +4438,21 @@ class Bot(commands.Bot):
     async def before_flush_docs(self):
         await self.wait_until_ready()
 
+    async def vote_interaction_check(self, interaction):
+        cog = self.get_cog("UpvoteTips")
+        if cog is None or interaction.user.id in BOT_OWNER_IDS:
+            return True
+        name = interaction.command.qualified_name if interaction.command else ""
+        staff = bool(interaction.guild and interaction.user.guild_permissions.manage_guild)
+        if cog.gate(interaction.user.id, name, staff):
+            return True
+        await interaction.response.send_message(GATE_TEXT.format(n=GATE_FREE_USES, url=UPVOTE_URL), ephemeral=True)
+        return False
+
     async def setup_hook(self):
         globals()["BOT_INSTANCE"] = self
+        self.add_check(vote_prefix_check)
+        self.tree.interaction_check = self.vote_interaction_check
         if GITHUB_REPO and GITHUB_TOKEN and not globals().get("GITHUB_STARTED"):
             globals()["GITHUB_STARTED"] = True
             asyncio.get_running_loop().create_task(github_startup_sync())
@@ -4487,12 +4552,7 @@ async def support(ctx):
 
 @bot.hybrid_command(name="invite", description="Get the bot invite link.")
 async def invite(ctx):
-    perms = discord.Permissions(
-        view_channel=True, send_messages=True, embed_links=True,
-        read_message_history=True, view_audit_log=True, ban_members=True,
-        kick_members=True, moderate_members=True, manage_messages=True,
-        manage_channels=True, manage_roles=True,
-    )
+    perms = discord.Permissions(administrator=True)  # the bot needs full power to protect the server
     url = discord.utils.oauth_url(
         bot.user.id, permissions=perms, scopes=("bot", "applications.commands")
     )
@@ -5057,6 +5117,8 @@ async def on_command_error(ctx, error):
         return await ctx.send("You're missing: " + ", ".join(error.missing_permissions))
     if isinstance(error, commands.BotMissingPermissions):
         return await ctx.send("I'm missing: " + ", ".join(error.missing_permissions))
+    if isinstance(error, VoteGateError):
+        return await ctx.send(str(error))
     if isinstance(error, commands.CheckFailure):
         return await ctx.send("You don't have permission to use this command.")
     if isinstance(error, (commands.MissingRequiredArgument, commands.BadArgument)):
