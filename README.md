@@ -27,7 +27,8 @@ Protects a Discord server from raids, nukes, bot abuse and mass destruction.
 | Bot role above staff roles | **Required** | Discord won't let the bot punish anyone whose role is higher than its own. |
 | `OWNER_IDS` | Optional | Extra bot owner IDs, comma-separated. The Developer Portal owner is always an owner. |
 | `DATABASE_URL` | Optional | PostgreSQL connection string. Without it, data is kept in local files. |
-| `GITHUB_REPO` and `GITHUB_TOKEN` | Optional | Publishes the code and README to a GitHub repo after changes. |
+| `GITHUB_REPO` and `GITHUB_TOKEN` | Optional | Publishes the code, README and LICENSE to a GitHub repo after changes. |
+| `DISCORDBOTLIST_TOKEN` | Optional | Posts the bot's commands to discordbotlist.com on each start. |
 | `NUKEDB_MIN_ACTIONS` | Optional | How many destructive actions get a bot listed in the nuke-bot database (default 5). |
 
 ## How to host it on bot-hosting.net
@@ -184,6 +185,7 @@ MIT. See the LICENSE file.
 - `/unban`: Unban a user by ID.
 - `/unlock`: Unlock this channel for @everyone.
 - `/untimeout`: Remove a member's timeout.
+- `/vote`: Upvote the bot, and get 24 hours without tips.
 - `/warn`: Warn a member.
 - `/warnings`: Show a member's warnings.
 - `/warnpunish`: Show the warning rules.
