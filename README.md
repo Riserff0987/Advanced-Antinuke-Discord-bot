@@ -3,6 +3,7 @@
 Protects a Discord server from raids, nukes, bot abuse and mass destruction.
 
 **Support server:** https://discord.gg/GHyc7GyNvX
+**Upvote:** https://discordbotlist.com/bots/nobara
 
 [![Deploy on Bot-Hosting](https://bot-hosting.net/assets/deploy-badge.svg)](https://bot-hosting.net/deploy?source=template&template=advanced-antinuke-discord-bot)
 
@@ -27,8 +28,6 @@ Protects a Discord server from raids, nukes, bot abuse and mass destruction.
 | `OWNER_IDS` | Optional | Extra bot owner IDs, comma-separated. The Developer Portal owner is always an owner. |
 | `DATABASE_URL` | Optional | PostgreSQL connection string. Without it, data is kept in local files. |
 | `GITHUB_REPO` and `GITHUB_TOKEN` | Optional | Publishes the code and README to a GitHub repo after changes. |
-| `GEMINI_API_KEY`, `OPENROUTER_API_KEY`, `GROQ_API_KEY` | Optional | Only for the AI features in `autofix.py`. Without them there is no AI. |
-| `AUTOFIX` and `AUTOFIX_SCHEDULE` | Optional | Set to `off` to turn off AI error fixes and the nightly review. |
 | `NUKEDB_MIN_ACTIONS` | Optional | How many destructive actions get a bot listed in the nuke-bot database (default 5). |
 
 ## How to host it on bot-hosting.net
@@ -43,10 +42,13 @@ Protects a Discord server from raids, nukes, bot abuse and mass destruction.
 
 ## Specialities
 
-- **Works without AI.** The protection does not depend on any AI service. AI is optional and only helps with bugs in the bot's own code.
-- **Safe AI changes.** Protection code is never changed by AI, and every AI fix is reported to the owner before it is applied.
+- **Works on its own.** The protection needs no external service: only the Discord token and the permissions above.
 - **Feature suggestions and bug reports** go to the bot owners by DM (`/request` and `/bug`).
 - **Premium features** such as forensics, reports, role backup and keys are listed in `/help` and tell you how to get premium.
+
+## License
+
+MIT. See the LICENSE file.
 
 ## Commands
 
@@ -77,8 +79,6 @@ Protects a Discord server from raids, nukes, bot abuse and mass destruction.
 - `/appguard punishment`: Set the punishment for the user behind the app. Minutes only apply to timeout.
 - `/appguard set`: Set the trigger: more than <messages> in <seconds> from one app user.
 - `/appguard status`: Show App Guard settings.
-- `/autofix`: Owner: AI review of the bot code. Applied only after you confirm.
-- `/autofixstatus`: Owner: scheduled AI review status.
 - `/automod`: Show automod settings.
 - `/automod action`: What to do on a violation (message is always deleted).
 - `/automod badword`: List blocked words.
@@ -197,4 +197,4 @@ Protects a Discord server from raids, nukes, bot abuse and mass destruction.
 - `/webhookguard set`: Set the trigger: more than <messages> in <seconds> from one webhook.
 - `/webhookguard status`: Show Webhook Guard settings.
 
-_This README is updated automatically whenever the bot code changes (2026-11-10)._
+_This README is updated automatically whenever the bot code changes (2026-11-11)._
