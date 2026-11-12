@@ -2600,6 +2600,46 @@ def user_install_info(meta):
     return False, None
 
 
+REVOKE_KEY = "app_revoked"  # "guild:user" -> time the denial ends
+REVOKE_MINUTES = 1440  # 24 hours
+
+
+async def revoke_external_apps(g, member):
+    """Denies 'Use External Apps' for this member in every text channel, and remembers when to lift it."""
+    changed = 0
+    for ch in g.text_channels:
+        if not ch.permissions_for(g.me).manage_roles:
+            continue
+        try:
+            ow = ch.overwrites_for(member)
+            ow.use_external_apps = False
+            await ch.set_permissions(member, overwrite=ow, reason="App guard: external apps revoked")
+            changed += 1
+        except (discord.HTTPException, TypeError, AttributeError):
+            continue
+        await asyncio.sleep(0.4)  # spread the requests out so Discord's rate limits are not hit
+    BOT_SETTINGS.data.setdefault(REVOKE_KEY, {})[f"{g.id}:{member.id}"] = time.time() + REVOKE_MINUTES * 60
+    BOT_SETTINGS.save()
+    return changed
+
+
+async def restore_external_apps(g, member):
+    """Lifts the denial: clears only the external-apps setting, and keeps every other overwrite."""
+    for ch in g.text_channels:
+        if not ch.permissions_for(g.me).manage_roles:
+            continue
+        try:
+            ow = ch.overwrites_for(member)
+            ow.use_external_apps = None
+            if ow.is_empty():
+                await ch.set_permissions(member, overwrite=None, reason="App guard: denial lifted")
+            else:
+                await ch.set_permissions(member, overwrite=ow, reason="App guard: denial lifted")
+        except (discord.HTTPException, TypeError, AttributeError):
+            continue
+        await asyncio.sleep(0.4)
+
+
 class AppGuard(commands.Cog):
     """Punishes the user behind a burst of messages sent through a user-installed app."""
 
@@ -2607,6 +2647,35 @@ class AppGuard(commands.Cog):
         self.bot = bot
         self.recent = defaultdict(deque)  # (guild id, user id) -> timestamps
         self.punished = {}
+        self.lift_revokes.start()
+
+    def cog_unload(self):
+        self.lift_revokes.cancel()
+
+    @tasks.loop(minutes=5)
+    async def lift_revokes(self):
+        """Lifts external-app denials whose 24 hours are over, also after a restart."""
+        now = time.time()
+        records = BOT_SETTINGS.data.get(REVOKE_KEY, {})
+        for key, until in list(records.items()):
+            if until > now:
+                continue
+            gid, uid = (int(x) for x in key.split(":"))
+            g = self.bot.get_guild(gid)
+            member = g.get_member(uid) if g else None
+            if g is not None and member is not None:
+                await restore_external_apps(g, member)
+                await mod_log(g, "App guard", f"External apps restored for <@{uid}> after 24 hours.")
+            records.pop(key, None)
+            BOT_SETTINGS.save()
+
+    @lift_revokes.before_loop
+    async def before_lift_revokes(self):
+        await self.bot.wait_until_ready()
+
+    @lift_revokes.error
+    async def lift_revokes_error(self, error):
+        await report_error("app guard lift", error)
 
     async def cog_check(self, ctx):
         if ctx.guild is None:
@@ -2653,6 +2722,17 @@ class AppGuard(commands.Cog):
             await self.debug_report(message)
         meta = interaction_meta(message)
         if meta is None:
+            # a follow-up message of an app's command: no interaction data, but sent with the app's id
+            app_id = getattr(message, "application_id", None)
+            if app_id and message.webhook_id is not None and g.get_member(message.author.id) is None:
+                followups = self.__dict__.setdefault("followups", defaultdict(deque))
+                bucket = followups[(g.id, app_id)]
+                now_t = time.monotonic()
+                bucket.append(now_t)
+                while bucket and now_t - bucket[0] > 10:
+                    bucket.popleft()
+                if len(bucket) > 5:
+                    await self.delete_messages([message])  # a burst of follow-ups: remove them
             return
         is_user, installer = user_install_info(meta)
         # Discord sent no install type. A bot that isn't a member of this server can only be
@@ -2701,7 +2781,13 @@ class AppGuard(commands.Cog):
         reason = f"App guard: {cfg['count']}+ messages via a user-installed app in {cfg['seconds']}s"
         note = ""
         try:
-            if action == "ban":
+            if action == "revoke":
+                if member is None:
+                    note = "not in server"
+                else:
+                    changed = await revoke_external_apps(g, member)
+                    note = f"external apps denied in {changed} channel(s) for 24 hours"
+            elif action == "ban":
                 await g.ban(discord.Object(id=user.id), reason=reason, delete_message_seconds=0)
                 note = "banned"
             elif member is None:
@@ -2766,7 +2852,7 @@ class AppGuard(commands.Cog):
     @appguard.command(name="punishment")
     async def ag_punishment(
         self, ctx,
-        action: Literal["timeout", "kick", "ban"],
+        action: Literal["timeout", "kick", "ban", "revoke"],
         minutes: commands.Range[int, 1, 10080] = None,
     ):
         """Set the punishment for the user behind the app. Minutes only apply to timeout."""
@@ -3006,6 +3092,8 @@ class BotSpam(commands.Cog):
         g = message.guild
         if g is None or not message.author.bot or message.webhook_id is not None:
             return
+        if interaction_meta(message) is not None and g.get_member(message.author.id) is None:
+            return  # an app's command: AppGuard handles it, so BotSpam must not also act
         if message.author.id == self.bot.user.id:
             return
         cfg = bs_cfg(g)
