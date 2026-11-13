@@ -199,4 +199,4 @@ MIT. See the LICENSE file.
 - `/webhookguard set`: Set the trigger: more than <messages> in <seconds> from one webhook.
 - `/webhookguard status`: Show Webhook Guard settings.
 
-_This README is updated automatically whenever the bot code changes (2026-11-12)._
+_This README is updated automatically whenever the bot code changes (2026-11-13)._
