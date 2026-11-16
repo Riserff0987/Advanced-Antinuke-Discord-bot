@@ -2009,6 +2009,40 @@ class BoostRewards(commands.Cog):
         except discord.HTTPException:
             pass
 
+    async def catch_up(self):
+        """Removes boost reward roles from members who are not boosting. This covers members who stopped
+        boosting while the bot was offline."""
+        for g in self.bot.guilds:
+            reward_roles = [r for rid in self.cfg(g)["roles"] if (r := g.get_role(rid))]
+            if not reward_roles:
+                continue
+            try:
+                if not g.chunked:
+                    await asyncio.wait_for(g.chunk(), timeout=120)
+            except (asyncio.TimeoutError, discord.HTTPException):
+                pass
+            for member in list(g.members):
+                if member.bot or member.premium_since is not None:
+                    continue
+                stale = [r for r in reward_roles if r in member.roles]
+                if not stale:
+                    continue
+                try:
+                    await member.remove_roles(*stale, reason="Server boost ended (found on restart)")
+                except discord.HTTPException:
+                    continue
+                await asyncio.sleep(0.5)  # spread the requests so Discord's rate limits are not hit
+
+    @commands.Cog.listener()
+    async def on_ready(self):
+        if getattr(self, "caught_up", False):
+            return
+        self.caught_up = True
+        try:
+            await self.catch_up()
+        except Exception as exc:
+            print(f"[boost] catch-up failed: {exc!r}", flush=True)
+
     async def handle(self, member, started, left=False):
         g = member.guild
         cfg = self.cfg(g)
@@ -4492,6 +4526,87 @@ async def vote_prefix_check(ctx):
     raise VoteGateError(GATE_TEXT.format(n=GATE_FREE_USES, url=UPVOTE_URL))
 
 
+# ---------------- threat score: mixed actions, and a guild-wide circuit breaker ----------------
+
+THREAT_POINTS = {"channel_delete": 5, "role_delete": 5, "ban": 4, "member_prune": 4,
+                 "kick": 3, "webhook_create": 3, "webhook_delete": 3}
+THREAT_LIMIT = 8  # points within THREAT_WINDOW seconds
+THREAT_WINDOW = 10
+BREAKER_EVENTS = 8  # destructive events from ANY users within BREAKER_WINDOW seconds
+BREAKER_WINDOW = 5
+
+
+def threat_step(scores, events, now, uid, points):
+    """Adds one event. Returns (total points for this user, set of users if the circuit breaker trips, else None)."""
+    q = scores
+    q.append((now, points))
+    while q and now - q[0][0] > THREAT_WINDOW:
+        q.popleft()
+    total = sum(p for _, p in q)
+    events.append((now, uid))
+    while events and now - events[0][0] > BREAKER_WINDOW:
+        events.popleft()
+    tripped = {u for _, u in events} if len(events) > BREAKER_EVENTS else None
+    if tripped is not None:
+        events.clear()
+    return total, tripped
+
+
+class ThreatScore(commands.Cog):
+    """Scores each user across all destructive actions, and trips a breaker when many users act at once."""
+
+    def __init__(self, bot):
+        self.bot = bot
+        self.scores = defaultdict(deque)  # (guild id, user id) -> (time, points)
+        self.events = defaultdict(deque)  # guild id -> (time, user id)
+
+    async def punish_user(self, guild, uid, cfg, reason, is_bot):
+        antinuke = self.bot.get_cog("AntiNuke")
+        if antinuke is None:
+            return
+        pk = (guild.id, uid)
+        now = time.monotonic()
+        if now - antinuke.punished.get(pk, -999) < 30:
+            return
+        antinuke.punished[pk] = now
+        ok = await antinuke.punish(guild, uid, cfg, reason, force_ban=bool(is_bot))
+        if not ok:
+            antinuke.punished.pop(pk, None)
+
+    @commands.Cog.listener()
+    async def on_audit_log_entry_create(self, entry):
+        if entry.guild is None or entry.user is None or entry.user.id == self.bot.user.id:
+            return
+        points = THREAT_POINTS.get(entry.action.name)
+        if points is None:
+            return
+        antinuke = self.bot.get_cog("AntiNuke")
+        if antinuke is None:
+            return
+        cfg = antinuke.store.get(entry.guild.id)
+        if not cfg.get("enabled", True) or antinuke.trusted(entry.guild, entry.user.id, cfg):
+            return
+        uid, gid = entry.user.id, entry.guild.id
+        total, tripped = threat_step(self.scores[(gid, uid)], self.events[gid], time.time(), uid, points)
+        if total >= THREAT_LIMIT:
+            self.scores[(gid, uid)].clear()
+            await self.punish_user(entry.guild, uid, cfg,
+                                   f"Threat score {total} within {THREAT_WINDOW}s (mixed destructive actions)",
+                                   entry.user.bot)
+        if tripped:
+            await mod_log(entry.guild, "Circuit breaker",
+                          f"More than {BREAKER_EVENTS} destructive actions in {BREAKER_WINDOW}s from several users. "
+                          f"Punishing everyone involved.")
+            for actor in tripped:
+                if actor == self.bot.user.id:
+                    continue
+                if antinuke.trusted(entry.guild, actor, cfg):
+                    continue
+                member = entry.guild.get_member(actor)
+                await self.punish_user(entry.guild, actor, cfg, "Circuit breaker: many destructive actions at once",
+                                       member is not None and member.bot)
+
+
 class Bot(commands.Bot):
     async def is_owner(self, user):
         # Extra owners pass every bot-owner check (commands.is_owner, cog checks, etc.)
@@ -4573,6 +4688,7 @@ class Bot(commands.Bot):
         await self.add_cog(AutoModWatch(self))
         await self.add_cog(PremiumStubs(self))
         await self.add_cog(BotTools(self))
+        await self.add_cog(ThreatScore(self))
         await self.add_cog(UpvoteTips(self))
         await self.add_cog(WarnPunish(self))
         await self.add_cog(SuggestionsAndBugs(self))
