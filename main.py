@@ -749,6 +749,7 @@ class AntiNuke(commands.Cog):
             return True
         except discord.HTTPException:
             return False
+            return False
 
     # ---------- commands ----------
 
