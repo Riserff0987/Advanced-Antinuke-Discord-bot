@@ -40,6 +40,13 @@ ACTIONS = {
     discord.AuditLogAction.sticker_delete: "sticker_delete",
     discord.AuditLogAction.emoji_create: "emoji_create",
     discord.AuditLogAction.sticker_create: "sticker_create",
+    discord.AuditLogAction.overwrite_create: "overwrite",
+    discord.AuditLogAction.overwrite_update: "overwrite",
+    discord.AuditLogAction.overwrite_delete: "overwrite",
+    discord.AuditLogAction.thread_create: "thread",
+    discord.AuditLogAction.thread_delete: "thread",
+    discord.AuditLogAction.webhook_delete: "webhook_delete",
+    discord.AuditLogAction.member_prune: "prune",
     discord.AuditLogAction.member_update: "nick_change",
     discord.AuditLogAction.member_role_update: "member_role_update",
     discord.AuditLogAction.automod_rule_create: "automod_create",
@@ -74,6 +81,10 @@ DEFAULTS = {
         "sticker_create": 3,
         "member_role_update": 10,  # role grants (dangerous ones are handled separately)
         "role_update": 5,
+        "overwrite": 5,  # permission overwrites added, changed or removed
+        "thread": 5,
+        "webhook_delete": 3,
+        "prune": 0,  # any mass prune is stopped
     },
     "warnings": {},
     "raid": {
@@ -513,8 +524,9 @@ class AntiNuke(commands.Cog):
         key = ACTIONS.get(entry.action)
         if not key or entry.user is None or entry.user.id == self.bot.user.id:
             return  # never count the bot's own actions
+        permission_only = False
         if key in ("channel_update", "role_update") and getattr(entry.before, "name", None) == getattr(entry.after, "name", None):
-            return  # not a rename (permission or position edit), so don't count it
+            permission_only = True  # no rename: still checked for dangerous permissions below, but not counted
         if key == "nick_change":
             return  # nickname changes are counted from live member events instead
         guild = entry.guild
@@ -530,6 +542,8 @@ class AntiNuke(commands.Cog):
         if perms:
             await self.dangerous_punish(guild, entry, perms, cfg)
             return
+        if permission_only:
+            return  # a permission edit with nothing dangerous in it: not counted
 
         now = time.monotonic()
         rq = self.recent[(guild.id, entry.user.id)]
