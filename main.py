@@ -3673,7 +3673,7 @@ class AutoModWatch(commands.Cog):
             await asyncio.sleep(1)
 
     @scan.error
-    async def scan_error(self, self_arg, error):
+    async def scan_error(self, error):
         await report_error('loop scan', error)
     @scan.before_loop
     async def before_scan(self):
