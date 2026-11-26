@@ -521,6 +521,11 @@ class AntiNuke(commands.Cog):
 
     @commands.Cog.listener()
     async def on_audit_log_entry_create(self, entry: discord.AuditLogEntry):
+        if entry.action == discord.AuditLogAction.webhook_create and getattr(entry.target, "id", None):
+            cache = self.__dict__.setdefault("webhook_creators", {})
+            cache[entry.target.id] = entry.user  # remember who made it while the audit entry is fresh
+            while len(cache) > 2000:
+                cache.pop(next(iter(cache)))
         key = ACTIONS.get(entry.action)
         if not key or entry.user is None or entry.user.id == self.bot.user.id:
             return  # never count the bot's own actions
@@ -2966,6 +2971,9 @@ class WebhookGuard(commands.Cog):
         await self.delete_messages(msgs)
 
     async def find_creator(self, g, wid):
+        cached = self.__dict__.get("webhook_creators", {}).get(wid)
+        if cached is not None:
+            return cached  # recorded when the webhook was created
         try:
             async for entry in g.audit_logs(limit=500, action=discord.AuditLogAction.webhook_create):
                 if getattr(entry.target, "id", None) == wid:
