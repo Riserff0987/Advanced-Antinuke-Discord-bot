@@ -4299,6 +4299,17 @@ class SuggestionsAndBugs(commands.Cog):
         key = (ctx.author.id, kind)
         if now - self.last.get(key, 0) < cooldown:
             return await ctx.send(f"Please wait {cooldown // 60} minutes between {kind} reports.")
+        today = time.strftime("%Y-%m-%d", time.gmtime(now))
+        daily = self.__dict__.setdefault("daily_reports", {})
+        if daily.get((today, kind), 0) >= 60:
+            return await ctx.send("Too many reports today. Try again tomorrow.")
+        srv = ctx.guild.id if ctx.guild else f"dm-{ctx.author.id}"
+        per_server = self.__dict__.setdefault("server_reports", {}).setdefault((srv, kind), [])
+        per_server[:] = [t for t in per_server if now - t < 3600]
+        if len(per_server) >= 3:
+            return await ctx.send(f"This server already sent 3 {kind} reports this hour. Try again later.")
+        per_server.append(now)
+        daily[(today, kind)] = daily.get((today, kind), 0) + 1
         self.last[key] = now
         sid = add_suggestion(kind, ctx, text)
         embed = discord.Embed(title=f"{'Bug report' if kind == 'bug' else 'Feature suggestion'} #{sid}",
@@ -4740,7 +4751,8 @@ def get_prefix(bot, message):
     return commands.when_mentioned_or(prefix)(bot, message)
 
 
-bot = Bot(command_prefix=get_prefix, intents=intents, owner_ids=EXTRA_OWNERS, help_command=None)
+bot = Bot(command_prefix=get_prefix, intents=intents, owner_ids=EXTRA_OWNERS, help_command=None,
+           allowed_mentions=discord.AllowedMentions(everyone=False, roles=False, users=True))  # typed text can't ping @everyone/@here/roles
 
 PRESENCE_PATH = os.getenv("PRESENCE_PATH", "presence.json")
 STATES = {
