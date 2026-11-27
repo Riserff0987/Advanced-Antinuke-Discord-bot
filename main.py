@@ -620,12 +620,13 @@ class AntiNuke(commands.Cog):
         """The bot's own record of who added each bot, written the moment it happens."""
         if entry.action != discord.AuditLogAction.bot_add or entry.target is None or entry.user is None or entry.guild is None:
             return
-        BOT_SETTINGS.data.setdefault("bot_adders", {})[f"{entry.guild.id}:{entry.target.id}"] = {
+        cfg = self.store.get(entry.guild.id)
+        cfg.setdefault("bot_adders", {})[f"{entry.guild.id}:{entry.target.id}"] = {
             "adder": entry.user.id, "ts": int(time.time())}
-        recs = BOT_SETTINGS.data["bot_adders"]
+        recs = cfg["bot_adders"]
         while len(recs) > 2000:
-            recs.pop(next(iter(recs)))  # keep the latest 2000
-        BOT_SETTINGS.save()
+            recs.pop(next(iter(recs)))
+        self.store.save()
 
     async def find_adder(self, guild, bot_id):
         """The bot's own record first. The audit log is only a fallback, for bots added before that record existed."""
@@ -768,8 +769,8 @@ class AntiNuke(commands.Cog):
             return True
         except discord.HTTPException:
             return False
-            return False
-            return False
+
+    # ---------- commands ----------
 
     # ---------- commands ----------
 
